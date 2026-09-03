@@ -1,0 +1,155 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "GCC: Build Coffee2 Debug",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "Coffee2",
+                "-Configuration",
+                "Debug"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Fresh Coffee2 Debug",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "Coffee2",
+                "-Configuration",
+                "Debug",
+                "-Fresh"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Build Coffee2 Release",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "Coffee2",
+                "-Configuration",
+                "Release"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Build MilkTea Debug",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "MilkTea",
+                "-Configuration",
+                "Debug"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Fresh MilkTea Debug",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "MilkTea",
+                "-Configuration",
+                "Debug",
+                "-Fresh"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Build MilkTea Release",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\build.ps1",
+                "-Product",
+                "MilkTea",
+                "-Configuration",
+                "Release"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Program Coffee2 Debug (OpenOCD)",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\flash.ps1",
+                "-Product",
+                "Coffee2",
+                "-Configuration",
+                "Debug",
+                "-Backend",
+                "OpenOCD",
+                "-Program"
+            ],
+            "dependsOn": "GCC: Build Coffee2 Debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "GCC: Program MilkTea Debug (OpenOCD)",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\GCC-ARM\\scripts\\flash.ps1",
+                "-Product",
+                "MilkTea",
+                "-Configuration",
+                "Debug",
+                "-Backend",
+                "OpenOCD",
+                "-Program"
+            ],
+            "dependsOn": "GCC: Build MilkTea Debug",
+            "problemMatcher": []
+        }
+    ]
+}

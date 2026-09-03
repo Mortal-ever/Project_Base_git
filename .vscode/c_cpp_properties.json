@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "GCC Coffee2",
+            "compileCommands": "${workspaceFolder}/GCC-ARM/build/Coffee2-Debug/compile_commands.json",
+            "compilerPath": "${workspaceFolder}/GCC-ARM/.tools/arm-gnu-toolchain/bin/arm-none-eabi-gcc.exe",
+            "cStandard": "c11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-arm"
+        },
+        {
+            "name": "GCC MilkTea",
+            "compileCommands": "${workspaceFolder}/GCC-ARM/build/MilkTea-Debug/compile_commands.json",
+            "compilerPath": "${workspaceFolder}/GCC-ARM/.tools/arm-gnu-toolchain/bin/arm-none-eabi-gcc.exe",
+            "cStandard": "c11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-arm"
+        }
+    ],
+    "version": 4
+}

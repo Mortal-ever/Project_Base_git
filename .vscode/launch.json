@@ -1,0 +1,47 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "GCC Coffee2 Debug (OpenOCD)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/GCC-ARM/build/Coffee2-Debug/Coffee2Target.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "device": "STM32F407VE",
+            "interface": "swd",
+            "serverpath": "${workspaceFolder}/GCC-ARM/.tools/openocd/bin/openocd.exe",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "searchDir": [
+                "${workspaceFolder}/GCC-ARM/.tools/openocd/openocd/scripts"
+            ],
+            "gdbPath": "${workspaceFolder}/GCC-ARM/.tools/arm-gnu-toolchain/bin/arm-none-eabi-gdb.exe",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "GCC: Build Coffee2 Debug"
+        },
+        {
+            "name": "GCC MilkTea Debug (OpenOCD)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/GCC-ARM/build/MilkTea-Debug/MilkTeaTarget.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "device": "STM32F407VE",
+            "interface": "swd",
+            "serverpath": "${workspaceFolder}/GCC-ARM/.tools/openocd/bin/openocd.exe",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "searchDir": [
+                "${workspaceFolder}/GCC-ARM/.tools/openocd/openocd/scripts"
+            ],
+            "gdbPath": "${workspaceFolder}/GCC-ARM/.tools/arm-gnu-toolchain/bin/arm-none-eabi-gdb.exe",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "GCC: Build MilkTea Debug"
+        }
+    ]
+}

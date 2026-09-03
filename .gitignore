@@ -1,0 +1,30 @@
+GCC-ARM/.tools/
+GCC-ARM/build/
+
+# Local Codex/agent working files
+.codex_tmp/
+tmp/
+
+# Keil/MDK generated intermediates and listings
+MDK-ARM/Objects/
+MDK-ARM/List/
+*.uvguix.*
+*.axf
+*.crf
+*.d
+*.dep
+*.iex
+*.htm
+*.lnp
+*.scvd
+*.tra
+*.bak
+
+# Generic compiler outputs
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+compile_commands.json

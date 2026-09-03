@@ -1,0 +1,41 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
+            "cacheVariables": {
+                "CMAKE_MAKE_PROGRAM": "${sourceDir}/.tools/python/bin/ninja.exe"
+            }
+        },
+        {
+            "name": "Coffee2-Debug",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "PRODUCT_NAME": "Coffee2"
+            }
+        },
+        {
+            "name": "Coffee2-Release",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "PRODUCT_NAME": "Coffee2"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Coffee2-Debug",
+            "configurePreset": "Coffee2-Debug"
+        },
+        {
+            "name": "Coffee2-Release",
+            "configurePreset": "Coffee2-Release"
+        }
+    ]
+}

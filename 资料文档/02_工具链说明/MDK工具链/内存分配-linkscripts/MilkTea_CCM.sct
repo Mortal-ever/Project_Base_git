@@ -1,0 +1,24 @@
+; *************************************************************
+; *** MilkTea scatter-loading description for STM32F407VETx ***
+; *************************************************************
+
+LR_IROM1 0x08000000 0x00080000  {
+  ER_IROM1 0x08000000 0x00080000  {
+    *.o (RESET, +First)
+    *(InRoot$$Sections)
+    .ANY (+RO)
+    .ANY (+XO)
+  }
+
+  RW_CCM 0x10000000 UNINIT 0x00010000  {
+    app_task_manager.o (CCM_HEAP)
+  }
+
+  RW_IRAM2 0x2001C000 UNINIT 0x00004000  {
+    startup_stm32f407xx.o (STACK)
+  }
+
+  RW_IRAM1 0x20000000 0x0001C000  {
+    .ANY (+RW +ZI)
+  }
+}

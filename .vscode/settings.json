@@ -1,0 +1,6 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}/GCC-ARM",
+    "cmake.cmakePath": "${workspaceFolder}/GCC-ARM/.tools/python/cmake/data/bin/cmake.exe",
+    "commentTranslate.source": "Copilot",
+    "commentTranslate.targetLanguage": "zh-CN"
+}

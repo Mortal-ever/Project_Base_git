@@ -1,0 +1,21 @@
+>>以下是MilkTeaTarget 使用到的设备以及协议:
+
+robot1: robot寄存器整理.xlsx 越疆协议2;越疆本体状态以及命令;
+robot2: robot寄存器整理.xlsx 越疆协议3;越疆本体状态以及命令;
+robot3: robot寄存器整理.xlsx robot3是节卡协议;节卡本体状态以及命令
+
+奶茶机: Modbus TCP Client  奶茶机modbus协议.md 奶茶机server IP: 192.168.5.100:1502
+
+日志传输: 串口1 115200
+
+制冰机: 串口2 19200 ModbusRTU从站号1 MilkTea专用制冰机通讯协议.docx 
+
+落杯机: 串口3 9600 ModbusRTU从站号1 晟枢 - 落杯落盖分体 - 通讯协议v1.4.docx(使用分体式且只使用落杯机站号1,落盖机使用电机控制不走协议) 
+落盖机: 使用IO电机控制 负责落盖和压盖功能
+电能表:  串口3 9600 ModbusRTU从站号2 电能表-DDSU666昆仑新国标单相导轨表使用说明书(2P)-202310 (4).pdf 
+
+蒸汽机: 串口4 9600 ModbusRTU从站号1 单屏双头蒸汽机Modbus通信协议说明.docx 
+封膜机: 串口4 9600 ModbusRTU从站号2 封口机内部通信协议手册.docx 
+
+输入IO模块: 串口5 38400 ModbusRTU从站号1 IO模块-数字量输入输出系列使用手册(RS485&RS232版).pdf 
+输出IO模块: 串口5 38400 ModbusRTU从站号1 IO模块-数字量输入输出系列使用手册(RS485&RS232版).pdf 
