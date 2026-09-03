@@ -28,3 +28,4 @@ MDK-ARM/List/
 *.bin
 *.map
 compile_commands.json
+MDK-ARM/.vscode/uv4.log
