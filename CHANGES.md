@@ -1,5 +1,6 @@
 | Date | File | Action | Description |
 | --- | --- | --- | --- |
+| 2026-09-03 | `资料文档/02_工具链说明/Git工具链/Git使用与GitHub维护说明书.md`; `CHANGES.md` | Add/Modify | 新增当前 Project_Base Git/GitHub 初始化、上传、维护、冲突、缓存忽略、LFS 和故障排查说明。 |
 | 2026-09-03 | `.gitignore`; `CHANGES.md` | Modify | 以恢复后的 Project_Base 本地内容重新建立独立 Git 仓库，补充 Codex/Agent、GCC、Keil 临时文件忽略规则；准备覆盖远程错误版本。 |
 | 2026-08-29 | MDK-ARM/Objects/Coffee2/Coffee2_cache_audit_20260829.log | Verify | 使用 ARM Compiler V5.06u7 对当前 Coffee2 Target 执行全量 Rebuild：Code=191044、RO-data=5824、RW-data=532、ZI-data=150436，0 Error(s)、0 Warning(s)；未烧录。 |
 | 2026-08-29 | AGENTS.md; 资料文档/00_README/工程基础缓存.md; 资料文档/00_README/00_README_索引.md; 资料文档/全局审查.md | Add/Modify | 建立 Coffee2 基础缓存与持久维护规则，固化 UserAPP 私有设备/协议选型与公共能力边界，明确 CommonTargets.h 是唯一启动组合适配器，并将带 MilkTea 语义的 DeviceModel/IO_State 标为 OUT_OF_SCOPE（legacy 遗留实现）；修订 MCU/Flash 冲突、启动任务、epoch 身份匹配、GCC 构建图冲突及历史证据标记；未烧录。 |
