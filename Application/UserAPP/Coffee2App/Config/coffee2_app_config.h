@@ -102,7 +102,7 @@
 
 /** @brief Workflow timing parameters. */
 #define COFFEE2_WORKFLOW_QUEUE_LENGTH        2U
-#define COFFEE2_WORKFLOW_IO_REFRESH_MS       200U
+#define COFFEE2_WORKFLOW_IO_REFRESH_MS       100U
 #define COFFEE2_WORKFLOW_DEFAULT_TIMEOUT_MS  30000U
 /** @brief Provisional syrup controller time units per host 0.1 ml unit. */
 #define COFFEE2_SYRUP_TIME_PER_VOLUME_UNIT    1U

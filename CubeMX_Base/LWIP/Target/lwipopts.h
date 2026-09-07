@@ -32,7 +32,7 @@
 /* USER CODE BEGIN 0 */
 #define LWIP_SO_RCVTIMEO 1
 #define LWIP_SO_SNDTIMEO 1
-#define MEMP_NUM_TCP_PCB 16
+#define MEMP_NUM_TCP_PCB 20
 #define LWIP_TCP_KEEPALIVE 1
 #define TCP_LISTEN_BACKLOG 1
 #define SO_REUSE 1
@@ -60,7 +60,7 @@
 /*----- Value in opt.h for MEM_ALIGNMENT: 1 -----*/
 #define MEM_ALIGNMENT 4
 /*----- Default Value for MEM_SIZE: 1600 ---*/
-#define MEM_SIZE 32768
+#define MEM_SIZE 24576
 /*----- Default Value for MEMP_NUM_TCP_PCB_LISTEN: 8 ---*/
 #define MEMP_NUM_TCP_PCB_LISTEN 3
 /*----- Default Value for MEMP_NUM_TCP_SEG: 16 ---*/
@@ -70,7 +70,7 @@
 /*----- Default Value for MEMP_NUM_NETBUF: 2 ---*/
 #define MEMP_NUM_NETBUF 10
 /*----- Default Value for MEMP_NUM_NETCONN: 4 ---*/
-#define MEMP_NUM_NETCONN 12
+#define MEMP_NUM_NETCONN 16
 /*----- Default Value for PBUF_POOL_SIZE: 16 ---*/
 #define PBUF_POOL_SIZE 12
 /*----- Default Value for PBUF_POOL_BUFSIZE: 592 ---*/
@@ -94,7 +94,7 @@
 /*----- Value in opt.h for TCPIP_THREAD_PRIO: 1 -----*/
 #define TCPIP_THREAD_PRIO 24
 /*----- Value in opt.h for TCPIP_MBOX_SIZE: 0 -----*/
-#define TCPIP_MBOX_SIZE 6
+#define TCPIP_MBOX_SIZE 12
 /*----- Value in opt.h for SLIPIF_THREAD_STACKSIZE: 0 -----*/
 #define SLIPIF_THREAD_STACKSIZE 1024
 /*----- Value in opt.h for SLIPIF_THREAD_PRIO: 1 -----*/

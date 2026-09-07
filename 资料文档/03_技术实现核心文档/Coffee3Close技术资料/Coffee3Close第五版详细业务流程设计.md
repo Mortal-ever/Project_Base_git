@@ -316,8 +316,8 @@ X4业务真值已经审核：1=水源允许工作，0=缺水报警。订单前�
 
 | 点位 | 中文名称 | English macro |
 | --- | --- | --- |
-| X1 | 成品放杯位前有杯信号 | `X1_FINISHED_PRODUCT_FRONT_CUP` |
-| X2 | 成品放杯位后有杯信号 | `X2_FINISHED_PRODUCT_REAR_CUP` |
+| X1 | 成品放杯位前有杯信号 | `X1_FINISHED1_CUP` |
+| X2 | 成品放杯位后有杯信号 | `X2_FINISHED2_CUP` |
 | X3 | 出餐口放杯位有杯信号 | `X3_OUTLET_CUP` |
 | X4 | 纯净水桶1液位低信号 | `X4_PURE_WATER_BUCKET1_LOW_LEVEL` |
 | X5 | 废渣箱有桶检测信号 | `X5_WASTE_RESIDUE_BIN` |
@@ -334,14 +334,14 @@ X4业务真值已经审核：1=水源允许工作，0=缺水报警。订单前�
 
 | 点位 | 中文名称 | English macro |
 | --- | --- | --- |
-| Y1 | 热水器继电器 | `Y1_WATER_HEATER_RELAY` |
+| Y1 | 热水器继电器 | `Y1_BOIL_WATER_RELAY` |
 | Y2-Y3 | 备用 | `Y2_RESERVED`, `Y3_RESERVED` |
 | Y4 | 冰箱-奶箱下层右1电磁阀 | `Y4_MILK_BOX_LOWER_R1_SOLENOID_VALVE` |
-| Y5 | 冰箱-果乳A下层右2电磁阀 | `Y5_FRUIT_MILK_A_LOWER_R2_SOLENOID_VALVE` |
-| Y6 | 冰箱-果乳B下层右3电磁阀 | `Y6_FRUIT_MILK_B_LOWER_R3_SOLENOID_VALVE` |
+| Y5 | 冰箱-果乳A下层右2电磁阀 | `Y5_FRUITA_LOWER_R2_SOLENOID_VALVE` |
+| Y6 | 冰箱-果乳B下层右3电磁阀 | `Y6_FRUITB_LOWER_R3_SOLENOID_VALVE` |
 | Y7-Y9 | 备用 | `Y7_RESERVED` ... `Y9_RESERVED` |
-| Y10 | 果乳A蠕动泵 | `Y10_FRUIT_MILK_A_PERISTALTIC_PUMP` |
-| Y11 | 果乳B蠕动泵 | `Y11_FRUIT_MILK_B_PERISTALTIC_PUMP` |
+| Y10 | 果乳A蠕动泵 | `Y10_FRUITA_PERISTALTIC_PUMP` |
+| Y11 | 果乳B蠕动泵 | `Y11_FRUITB_PERISTALTIC_PUMP` |
 | Y12-Y16 | 备用 | `Y12_RESERVED` ... `Y16_RESERVED` |
 
 ### 8.2 页面投影
@@ -395,14 +395,19 @@ Robot断线保留动作ID，不重发；RTU断线停止依赖步骤；掉电不�
 推荐格式（前缀与Coffee2现有格式一致，正文不固定模板）：
 
 ```text
-[0000WARN][C2Bus5:IoInput] IO_INPUT_MODULE_16CH_COMMAND_FAILED RESULT=-4 DEVICE_ID=9
+[0000WARN][C2Bus5:IoInput] IO_INPUT_MODULE_16CH_COMMAND_FAILED result=-4 device=9
 [0000WARN][C2Bus5:IoInput] RTU_DEVICE_OFFLINE result=-4 device=9
-[0000INFO][C3Workflow:Order] Order 123 content complete; continue final placement
-[0000INFO][C3Outlet:Door] Order 123 placed at outlet 1; lower door now
-[0000WARN][C3Water:OrderGate] Order 123 complete; X4 unavailable, reject next order
-[0000INFO][C3Outlet:Pickup] Outlet 1 empty for 30 s; publish customer-take state
-[0000INFO][C3Outlet:Pickup] Customer-take ACK consumed; release outlet 1
+[0000INFO][C3Workflow:Workflow] order=123 content complete; continue final placement
+[0000INFO][C3Robot:MBTcpClient] order=123 placement complete; target=OUTLET_1
+[0000WARN][C3Workflow:Workflow] order=123 complete; X4 unavailable; reject next order
+[0000INFO][C3Bus5:IoInput] outlet=1 empty for 30 s; publish customer-take state
+[0000INFO][C3Server:MBTcpServer] customer-take ACK received; release outlet=1
 ```
+
+`C3Outlet`、`C3Water`、`C3IoInput` 等业务对象或事件阶段不是 source，不能直接
+写入方括号。Coffee3 接入源码时必须在 target 私有 source 表注册稳定的
+`C3Workflow`、`C3Robot`、`C3Bus5`、`C3Server` 等 owner，再把订单、出餐口、X4
+和取餐 ACK 写入正文。完整规则见《../06_日志/日志输出标准与约束.md》。
 
 周期轮询不刷屏；初始化失败、设备离线、IO边沿、动作开始/完成/失败、客户取走ACK和恢复各打印一次或按去重策略打印。X4制作中缺水必须同时出现“本单正常完成”和“禁止下一单”的两条可读信息。`0x000B`日志必须明确它只确认客户取走，不是放杯许可。
 
