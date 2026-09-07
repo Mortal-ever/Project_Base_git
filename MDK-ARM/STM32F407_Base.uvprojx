@@ -562,6 +562,11 @@
           <GroupName>Application/Coffee2App</GroupName>
           <Files>
             <File>
+              <FileName>coffee2_device_bindings.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Application\UserAPP\Coffee2App\Config\coffee2_device_bindings.h</FilePath>
+            </File>
+            <File>
               <FileName>coffee2_log.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Application\UserAPP\Coffee2App\Comm_Log\coffee2_log.c</FilePath>

@@ -16,10 +16,11 @@ extern "C" {
 
 #include "FreeRTOS.h"
 #include "coffee2_app_config.h"
+#include "coffee2_workflow.h"
 
 /** @brief Host writable protocol block 0x0000 through 0x00AF. */
 #define COFFEE2_SERVER_COMMAND_COUNT          0x00B0U
-/** @brief Host readable protocol block 0x1000 through 0x10D4. */
+/** @brief Host readable protocol block 0x1000 through 0x10FF. */
 #define COFFEE2_SERVER_STATUS_COUNT           0x0100U
 /** @brief Private monitoring block 0x1100 through 0x117F. */
 #define COFFEE2_SERVER_DEBUG_COUNT            0x0080U
@@ -92,6 +93,9 @@ extern "C" {
 #define COFFEE2_PRODUCTION_RUNNING            1U
 #define COFFEE2_PRODUCTION_COMPLETED          2U
 #define COFFEE2_PRODUCTION_FAILED             3U
+
+/** @brief Project the active immutable order; called by Workflow only. */
+void vCoffee2ServerPublishOrder(const Coffee2Order_t *pxOrder);
 
 /** @brief Store one accepted TCP client slot's public status. */
 typedef struct {

@@ -58,8 +58,8 @@ ModbusPortResult_e xSyrupMachineRefresh(ModbusPort_t *pxPort,
   * @param[in] usTimeTenthsS Dispense time in 0.1 second units.
   * @param[in] ulTimeoutMs Modbus transaction timeout in milliseconds.
   * @param[in,out] pxImage Optional image marked as command accepted.
-  * @param[in] pxCancelCheck Reserved for API compatibility.
-  * @param[in] pvCancelContext Reserved for API compatibility.
+  * @param[in] pxCancelCheck Optional check before each write; nonzero cancels.
+  * @param[in] pvCancelContext Opaque context passed to the cancel check.
   * @retval MODBUS_PORT_RESULT_OK The slave acknowledged both writes.
   * @retval MODBUS_PORT_RESULT_TIMEOUT The slave did not reply in time.
   */
@@ -74,8 +74,8 @@ ModbusPortResult_e xSyrupMachineDispense(ModbusPort_t *pxPort,
   * @param[in] ucUnitId Device Unit ID.
   * @param[in] ulTimeoutMs Modbus transaction timeout in milliseconds.
   * @param[in,out] pxImage Optional image marked as command accepted.
-  * @param[in] pxCancelCheck Reserved for API compatibility.
-  * @param[in] pvCancelContext Reserved for API compatibility.
+  * @param[in] pxCancelCheck Optional check before the start write.
+  * @param[in] pvCancelContext Opaque context passed to the cancel check.
   * @retval MODBUS_PORT_RESULT_OK The slave acknowledged the write.
   * @retval MODBUS_PORT_RESULT_TIMEOUT The slave did not reply in time.
   */

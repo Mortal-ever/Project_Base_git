@@ -12,6 +12,7 @@
 
 #include "coffee2_app_config.h"
 #include "coffee2_log.h"
+#include "coffee2_workflow.h"
 #include "task.h"
 
 /** @brief Robot route plus addressable RTU route slots through Bus5. */
@@ -19,18 +20,7 @@
 #define COFFEE2_TERMINAL_HISTORY_COUNT       \
 	(COFFEE2_COMMAND_QUEUE_LENGTH + 2U)
 
-#if (COFFEE2_ROBOT_PROTOCOL_VARIANT == \
-	COFFEE2_ROBOT_PROTOCOL_2)
-#define COFFEE2_ROBOT_DRIVER_ID \
-	DEVICE_DRIVER_ROBOT_DOBOT_PROTOCOL_2
-#elif (COFFEE2_ROBOT_PROTOCOL_VARIANT == \
-	COFFEE2_ROBOT_PROTOCOL_3)
-#define COFFEE2_ROBOT_DRIVER_ID \
-	DEVICE_DRIVER_ROBOT_DOBOT_PROTOCOL_3
-#else
-#define COFFEE2_ROBOT_DRIVER_ID \
-	DEVICE_DRIVER_ROBOT_DOBOT_PROTOCOL_1
-#endif
+#include "coffee2_device_bindings.h"
 
 typedef struct {
 	uint32_t ulCommandId;
@@ -132,48 +122,6 @@ int32_t lCoffee2DeviceGetTerminalResult(Coffee2DeviceId_e xDeviceId,
 	return lResult;
 }
 
-/** @brief Immutable product device-to-bus binding table. */
-static const Coffee2DeviceBinding_t s_axBindings[] = {
-	{ COFFEE2_DEVICE_ROBOT, 0U, COFFEE2_ROBOT_UNIT_ID, 0U,
-		DEVICE_CATEGORY_ROBOT, DEVICE_ROLE_ROBOT_1,
-		COFFEE2_ROBOT_DRIVER_ID, DEVICE_PROTOCOL_MODBUS_TCP },
-	{ COFFEE2_DEVICE_COFFEE_MACHINE, 2U, 0U, 0U,
-		DEVICE_CATEGORY_COFFEE_MACHINE,
-		DEVICE_ROLE_COFFEE_MACHINE,
-		DEVICE_DRIVER_COFFEE_DRCOFFEE_F200,
-		DEVICE_PROTOCOL_COFFEE_F200_UART },
-	{ COFFEE2_DEVICE_CUP_MACHINE, 3U, 1U, 0U,
-		DEVICE_CATEGORY_CUP_MACHINE,
-		DEVICE_ROLE_CUP_MACHINE, DEVICE_DRIVER_CUP_SHENGSHU_MODBUS,
-		DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_SYRUP_MACHINE, 3U, 2U, 0U,
-		DEVICE_CATEGORY_SYRUP_MACHINE,
-		DEVICE_ROLE_SYRUP_MACHINE, DEVICE_DRIVER_SYRUP_CURRENT_MODBUS,
-		DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_LID_MACHINE, 3U, 1U, 0U,
-		DEVICE_CATEGORY_LID_MACHINE,
-		DEVICE_ROLE_LID_MACHINE, DEVICE_DRIVER_LID_SHENGSHU_MODBUS,
-		DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_ICE_MACHINE, 4U, 1U,
-		COFFEE2_ICE_MIN_FRAME_INTERVAL_MS,
-		DEVICE_CATEGORY_ICE_MACHINE, DEVICE_ROLE_ICE_MACHINE,
-		DEVICE_DRIVER_ICE_CURRENT_MODBUS, DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_SCALE, 4U, 2U, 0U,
-		DEVICE_CATEGORY_SCALE, DEVICE_ROLE_SCALE,
-		DEVICE_DRIVER_SCALE_BSQ_DG_V2, DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_POWER_METER, 3U, 3U, 0U,
-		DEVICE_CATEGORY_POWER_METER,
-		DEVICE_ROLE_POWER_METER, DEVICE_DRIVER_POWER_METER_DDSU666,
-		DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_IO_INPUT, 5U, 1U,
-		COFFEE2_IO_MIN_FRAME_INTERVAL_MS,
-		DEVICE_CATEGORY_IO, DEVICE_ROLE_IO_INPUT,
-		DEVICE_DRIVER_IO_MODBUS_DIGITAL, DEVICE_PROTOCOL_MODBUS_RTU },
-	{ COFFEE2_DEVICE_IO_OUTPUT, 5U, 2U,
-		COFFEE2_IO_MIN_FRAME_INTERVAL_MS,
-		DEVICE_CATEGORY_IO, DEVICE_ROLE_IO_OUTPUT,
-		DEVICE_DRIVER_IO_MODBUS_DIGITAL, DEVICE_PROTOCOL_MODBUS_RTU }
-};
 
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee2DeviceInitialize(void)
@@ -256,6 +204,19 @@ void vCoffee2OrderCancelRequest(uint32_t ulOrderEpoch)
 /*-----------------------------------------------------------*/
 uint8_t ucCoffee2CommandIsCanceled(const Coffee2Command_t *pxCommand)
 {
+	if ((pxCommand != NULL) &&
+		((pxCommand->ucFlags & COFFEE2_COMMAND_FLAG_SAFETY_STOP) != 0U) &&
+		(((pxCommand->usAction == COFFEE2_ACTION_CANCEL) &&
+		  ((pxCommand->ucDeviceId == COFFEE2_DEVICE_ROBOT) ||
+		   (pxCommand->ucDeviceId == COFFEE2_DEVICE_COFFEE_MACHINE))) ||
+		 ((pxCommand->ucDeviceId == COFFEE2_DEVICE_ICE_MACHINE) &&
+		  (pxCommand->usAction == COFFEE2_ACTION_ICE_SET_VALVE) &&
+		  (pxCommand->ausParameter[0] == 0U)) ||
+		 ((pxCommand->ucDeviceId == COFFEE2_DEVICE_IO_OUTPUT) &&
+		  (pxCommand->usAction == COFFEE2_ACTION_IO_WRITE) &&
+		  (pxCommand->ausParameter[1] == 0U)))) {
+		return 0U;
+	}
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucSource !=
 			(uint8_t)COFFEE2_COMMAND_SOURCE_WORKFLOW) ||
@@ -271,6 +232,7 @@ static BaseType_t prvSubmit(Coffee2Command_t *pxCommand,
 {
 	const Coffee2DeviceBinding_t *pxBinding;
 	QueueHandle_t xQueue;
+	BaseType_t xResult;
 
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucDeviceId == (uint8_t)COFFEE2_DEVICE_NONE) ||
@@ -296,10 +258,21 @@ static BaseType_t prvSubmit(Coffee2Command_t *pxCommand,
 		pxCommand->ulCommandId = s_ulNextCommandId;
 		taskEXIT_CRITICAL();
 	}
-	if (ucUrgent != 0U) {
-		return xQueueSendToFront(xQueue, pxCommand, xWaitTicks);
+	if (pxCommand->ucSource == COFFEE2_COMMAND_SOURCE_SERVER) {
+		if (xCoffee2WorkflowAcquireManual() != pdPASS) {
+			return pdFAIL;
+		}
+		pxCommand->ucFlags |= COFFEE2_COMMAND_FLAG_MANUAL_RESERVED;
 	}
-	return xQueueSend(xQueue, pxCommand, xWaitTicks);
+	xResult = (ucUrgent != 0U) ?
+		xQueueSendToFront(xQueue, pxCommand, xWaitTicks) :
+		xQueueSend(xQueue, pxCommand, xWaitTicks);
+	if ((xResult != pdPASS) &&
+		((pxCommand->ucFlags & COFFEE2_COMMAND_FLAG_MANUAL_RESERVED) != 0U)) {
+		vCoffee2WorkflowReleaseManual();
+		pxCommand->ucFlags &= (uint8_t)~COFFEE2_COMMAND_FLAG_MANUAL_RESERVED;
+	}
+	return xResult;
 }
 
 /*-----------------------------------------------------------*/
@@ -362,6 +335,9 @@ void vCoffee2DeviceCommandCompleted(const Coffee2Command_t *pxCommand,
 	pxStatus = &g_axCoffee2DeviceStatus[ucDeviceId];
 	xEvents = s_axDeviceEvents[ucDeviceId];
 	xSetBits = COFFEE2_DEVICE_EVENT_DATA_UPDATED;
+	if ((pxCommand->ucFlags & COFFEE2_COMMAND_FLAG_MANUAL_RESERVED) != 0U) {
+		vCoffee2WorkflowReleaseManual();
+	}
 	if (lResult == 0) {
 		(void)xEventGroupClearBits(xEvents,
 			COFFEE2_DEVICE_EVENT_COMM_FAULT |
@@ -660,13 +636,9 @@ EventBits_t xCoffee2DeviceWaitCommand(Coffee2DeviceId_e xDeviceId,
 			(xRemaining > pdMS_TO_TICKS(100U)) ?
 				pdMS_TO_TICKS(100U) : xRemaining);
 		if ((xBits & COFFEE2_DEVICE_EVENT_TERMINAL) != 0U) {
-			taskENTER_CRITICAL();
-			xStatus = g_axCoffee2DeviceStatus[xDeviceId];
-			taskEXIT_CRITICAL();
-			if ((xStatus.ulLastOrderEpoch == ulOrderEpoch) &&
-				(xStatus.ulLastCommandId == ulCommandId)) {
-				return xBits & COFFEE2_DEVICE_EVENT_TERMINAL;
-			}
+			/* Event bits are wakeups, not transaction identity. A latched
+			 * unrelated result must not spin and starve the bus owner. */
+			vTaskDelay(1U);
 		}
 	}
 }

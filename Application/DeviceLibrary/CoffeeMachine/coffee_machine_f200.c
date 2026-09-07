@@ -207,8 +207,10 @@ CoffeeMachineF200Result_e xCoffeeMachineF200Execute(
 	}
 	ulIoTimeoutMs = (ulTimeoutMs < F200_IO_TIMEOUT_MS) ?
 		ulTimeoutMs : F200_IO_TIMEOUT_MS;
-	(void)pxCancelCheck;
-	(void)pvCancelContext;
+	if ((xAction != COFFEE_MACHINE_F200_ACTION_CANCEL) &&
+		(pxCancelCheck != NULL) && (pxCancelCheck(pvCancelContext) != 0U)) {
+		return COFFEE_MACHINE_F200_RESULT_CANCELED;
+	}
 	if (xAction == COFFEE_MACHINE_F200_ACTION_REFRESH) {
 		return xCoffeeMachineF200Exchange(pxChannel,
 			COFFEE_MACHINE_F200_COMMAND_QUERY, 0U,
@@ -231,6 +233,9 @@ CoffeeMachineF200Result_e xCoffeeMachineF200Execute(
 	}
 	if (pxStatus->ucMachineState != F200_MACHINE_IDLE) {
 		return COFFEE_MACHINE_F200_RESULT_REJECTED;
+	}
+	if ((pxCancelCheck != NULL) && (pxCancelCheck(pvCancelContext) != 0U)) {
+		return COFFEE_MACHINE_F200_RESULT_CANCELED;
 	}
 	if (xAction == COFFEE_MACHINE_F200_ACTION_CLEAN) {
 		if (prvCommandSupported((CoffeeMachineF200Command_e)ucDrinkId) ==

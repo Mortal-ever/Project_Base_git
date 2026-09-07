@@ -83,7 +83,8 @@ typedef enum {
 	COFFEE2_ACTION_SYRUP_SET_REMAINING = 322,
 	COFFEE2_ACTION_ICE_SET_VALVE = 330, COFFEE2_ACTION_SCALE_TARE = 340,
 	COFFEE2_ACTION_SCALE_CLEAR_TARE = 341, COFFEE2_ACTION_SCALE_ZERO = 342,
-	COFFEE2_ACTION_IO_WRITE = 350
+	COFFEE2_ACTION_IO_WRITE = 350,
+	COFFEE2_ACTION_IO_WRITE_MASK = 351
 } Coffee2Action_e;
 
 /** @brief Per-device EventGroup bits with identical meaning for all devices. */
@@ -102,6 +103,8 @@ typedef enum {
 /** @brief Normalized result used when an order epoch is canceled. */
 #define COFFEE2_COMMAND_RESULT_CANCELED       (-9)
 #define COFFEE2_COMMAND_RESULT_SUPERSEDED     (-10)
+#define COFFEE2_COMMAND_FLAG_SAFETY_STOP       0x01U
+#define COFFEE2_COMMAND_FLAG_MANUAL_RESERVED   0x02U
 
 /** @brief Terminal command bits waited by workflow steps. */
 #define COFFEE2_DEVICE_EVENT_TERMINAL         \
@@ -138,6 +141,7 @@ typedef struct {
 	uint8_t ucRole;
 	uint8_t ucDriverId;
 	uint8_t ucProtocolId;
+	const char *pcName;
 } Coffee2DeviceBinding_t;
 
 /** @brief Store globally observable status for one logical device. */

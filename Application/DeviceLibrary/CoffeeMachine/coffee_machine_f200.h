@@ -76,6 +76,11 @@ CoffeeMachineF200Result_e xCoffeeMachineF200Exchange(
 	TransportChannel_t *pxChannel,
 	CoffeeMachineF200Command_e xCommand, uint8_t ucDrinkId,
 	uint32_t ulTimeoutMs, CoffeeMachineF200Status_t *pxStatus);
+/**
+  * @brief Execute an atomic F200 action with optional cooperative cancellation.
+  * @note The cancel check runs before I/O and again before MAKE/CLEAN after
+  *       QUERY. CANCEL itself is never suppressed; NULL preserves old behavior.
+  */
 CoffeeMachineF200Result_e xCoffeeMachineF200Execute(
 	TransportChannel_t *pxChannel, CoffeeMachineF200Action_e xAction,
 	uint8_t ucDrinkId, uint32_t ulTimeoutMs,

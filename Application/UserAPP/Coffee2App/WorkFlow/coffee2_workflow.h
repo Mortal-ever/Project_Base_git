@@ -76,9 +76,27 @@ typedef struct {
 	uint8_t ucHotWaterState;
 	uint8_t ucCoffeeCleanState;
 	uint8_t aucFruitState[2];
+	uint16_t ausOutputState[2];
+	uint16_t ausOutputOrderId[2];
+	uint16_t usActiveOutput;
+	uint16_t usAction;
+	uint8_t ucDeviceId;
+	uint8_t ucCommandSent;
+	uint8_t ucDeviceDone;
+	uint8_t ucPhysicalVerified;
+	uint8_t ucPositionUncertain;
+	uint8_t ucRecoveryRequired;
+	int32_t lSafetyResult;
 } Coffee2WorkflowStatus_t;
 
 extern Coffee2WorkflowStatus_t g_xCoffee2WorkflowStatus;
+
+/** @brief Reserve manual access until the submitted command terminates. */
+BaseType_t xCoffee2WorkflowAcquireManual(void);
+/** @brief Release one successful manual reservation in task context. */
+void vCoffee2WorkflowReleaseManual(void);
+/** @brief Queue a pickup ACK only for an already placed outlet transaction. */
+void vCoffee2WorkflowConfirmPickup(uint16_t usOutput);
 
 /**
   * @brief Create the bounded static order queue.

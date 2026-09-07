@@ -44,7 +44,7 @@ Application/UserAPP/Coffee2App/
 - Keil `Application/Coffee2App` 组同 12 源（`uvprojx:562-624`）。
 - `coffee2_manager.h` 只被 `freertos.c`（经 CommonTargets）include。
 
-## 5. 未进入构建的 legacy
+## 5. 未进入构建的 legacy 旧版的遗留
 
 - `Application/UserAPP/MilkTeaApp/*`：遗留，`OUT_OF_SCOPE`，不进 GCC/Keil。
 - `DeviceModel/IO_State`（若物理存在）：MilkTea 语义 legacy，Coffee2 用自己的
@@ -454,7 +454,6 @@ Keil=§27；断点=§28；检查表=§29；问题=§30；交叉链接=§31。
 - L1 文档：启动链与 freertos.c；L2 文档：日志/崩溃/OTA/transport/modbus_port；
   L3 文档：各设备驱动 API。
 - 架构定稿与缓存、全局审查索引（见 00_README 与根 CHANGES.md 本日记录）。
-
 
 
 

@@ -22,8 +22,9 @@ static ModbusPortResult_e prvStartAction(ModbusPort_t *pxPort,
 {
 	ModbusPortResult_e xResult;
 
-	(void)pxCancelCheck;
-	(void)pvCancelContext;
+	if ((pxCancelCheck != NULL) && (pxCancelCheck(pvCancelContext) != 0U)) {
+		return MODBUS_PORT_RESULT_CANCELED;
+	}
 	xResult = xModbusPortWriteRegister(pxPort, ucUnitId,
 		usAddress, 1U, ulTimeoutMs);
 	if ((xResult == MODBUS_PORT_RESULT_OK) && (pxImage != NULL)) {
@@ -55,6 +56,9 @@ ModbusPortResult_e xSyrupMachineDispense(ModbusPort_t *pxPort,
 		(ucChannel < SYRUP_MACHINE_CHANNEL_FIRST) ||
 		(ucChannel > SYRUP_MACHINE_CHANNEL_LAST)) {
 		return MODBUS_PORT_RESULT_INVALID_ARG;
+	}
+	if ((pxCancelCheck != NULL) && (pxCancelCheck(pvCancelContext) != 0U)) {
+		return MODBUS_PORT_RESULT_CANCELED;
 	}
 	xResult = xModbusPortWriteRegister(pxPort, ucUnitId, 0U,
 		usTimeTenthsS, ulTimeoutMs);

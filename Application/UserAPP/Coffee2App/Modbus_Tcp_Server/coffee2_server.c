@@ -71,8 +71,6 @@ static uint8_t s_ucOtaRejectLogged;
 static uint8_t s_ucOtaResetPending;
 /** @brief Tick captured when the legacy reset command is accepted. */
 static TickType_t s_xOtaResetRequestTick;
-/** @brief Workflow-owned output state for the two Coffee2 delivery ports. */
-static uint16_t s_ausOutputState[2];
 
 /**
   * @brief  Log one accepted client with its actual peer IPv4 endpoint.
@@ -229,7 +227,6 @@ BaseType_t xCoffee2ServerInitialize(void)
 	s_ucOtaRejectLogged = 0U;
 	s_ucOtaResetPending = 0U;
 	s_xOtaResetRequestTick = 0U;
-	memset(s_ausOutputState, 0, sizeof(s_ausOutputState));
 	g_xCoffee2ServerStatus.usListenPort = COFFEE2_SERVER_PORT;
 	return pdPASS;
 }
@@ -549,6 +546,42 @@ void vCoffee2ServerTask(void *pvArgument)
 }
 
 /*-----------------------------------------------------------*/
+void vCoffee2ServerPublishOrder(const Coffee2Order_t *pxOrder)
+{
+	taskENTER_CRITICAL();
+	/* Only fields defined by the Coffee2 status protocol are copied. */
+	s_ausStatusRegisters[0x0000U] =
+		pxOrder->ausRegister[COFFEE2_REG_ORDER_NUMBER];
+	s_ausStatusRegisters[0x0001U] =
+		pxOrder->ausRegister[COFFEE2_REG_COFFEE_TYPE];
+	s_ausStatusRegisters[0x0002U] =
+		pxOrder->ausRegister[COFFEE2_REG_LID_ENABLE];
+	s_ausStatusRegisters[0x0003U] =
+		pxOrder->ausRegister[COFFEE2_REG_SYRUP_1];
+	s_ausStatusRegisters[0x0004U] =
+		pxOrder->ausRegister[COFFEE2_REG_SYRUP_2];
+	s_ausStatusRegisters[0x0005U] =
+		pxOrder->ausRegister[COFFEE2_REG_ICE_AMOUNT];
+	s_ausStatusRegisters[0x0006U] = 0U;
+	s_ausStatusRegisters[0x0007U] = 0U;
+	s_ausStatusRegisters[0x0009U] = 0U;
+	s_ausStatusRegisters[0x000AU] = 0U;
+	s_ausStatusRegisters[0x000DU] =
+		pxOrder->ausRegister[COFFEE2_REG_ONLINE_OUTPUT];
+	s_ausStatusRegisters[0x000EU] =
+		pxOrder->ausRegister[COFFEE2_REG_FRUIT_MILK_A];
+	s_ausStatusRegisters[0x000FU] =
+		pxOrder->ausRegister[COFFEE2_REG_FRUIT_MILK_B];
+	s_ausStatusRegisters[0x0014U] =
+		pxOrder->ausRegister[COFFEE2_REG_SYRUP_3];
+	s_ausStatusRegisters[0x0015U] =
+		pxOrder->ausRegister[COFFEE2_REG_SYRUP_4];
+	s_ausStatusRegisters[COFFEE2_REG_PRODUCTION_STATUS -
+		COFFEE2_REG_STATUS_BASE] = COFFEE2_PRODUCTION_RUNNING;
+	taskEXIT_CRITICAL();
+}
+
+/*-----------------------------------------------------------*/
 void vCoffee2ServerPublishWorkflow(uint16_t usOrderId,
 	uint16_t usProductionStatus, uint16_t usStep, int32_t lError)
 {
@@ -571,7 +604,6 @@ void vCoffee2ServerPublishOutput(uint16_t usOutput, uint16_t usState)
 		return;
 	}
 	taskENTER_CRITICAL();
-	s_ausOutputState[usOutput - 1U] = usState;
 	if ((usState == 2U) || (usState == 5U)) {
 		s_ausStatusRegisters[0x0009U] = usOutput;
 	}
@@ -662,9 +694,6 @@ static nmbs_error prvReadHolding(uint16_t usAddress,
 static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 	uint16_t usValue)
 {
-	Coffee2IoState_t xIoSnapshot;
-	uint16_t usCurrent;
-	uint16_t usChanged;
 	uint8_t ucIndex;
 	uint8_t ucValue;
 
@@ -677,6 +706,7 @@ static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 		}
 		for (ucIndex = 0U; ucIndex < COFFEE2_LOCAL_IO_COUNT;
 			ucIndex++) {
+			/* Access was reserved by the range callback before any output. */
 			ucValue = ((usValue & (uint16_t)(1U << ucIndex)) != 0U) ?
 				1U : 0U;
 			if (ucCoffee2IoSetLocalOutput(ucIndex, ucValue) == 0U) {
@@ -689,27 +719,9 @@ static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 		return NMBS_ERROR_NONE;
 	}
 
-	vCoffee2IoGetSnapshot(&xIoSnapshot);
-	usCurrent = 0U;
-	for (ucIndex = 0U; ucIndex < COFFEE2_MODBUS_IO_COUNT;
-		ucIndex++) {
-		if (xIoSnapshot.xOutput.aucMB2YPin[ucIndex] != 0U) {
-			usCurrent |= (uint16_t)(1U << ucIndex);
-		}
-	}
-	usChanged = (uint16_t)(usCurrent ^ usValue);
-	(void)xCoffee2LogPrintfOrder(COFFEE2_LOG_LEVEL_INFO,
-		COFFEE2_LOG_SOURCE_SERVER, COFFEE2_LOG_ORDER_DEBUG,
-		"REMOTE_IO_DEBUG_OUTPUT_REQUEST=0x%04X", usValue);
-	for (ucIndex = 0U; ucIndex < COFFEE2_MODBUS_IO_COUNT;
-		ucIndex++) {
-		if ((usChanged & (uint16_t)(1U << ucIndex)) != 0U) {
-			if (prvSubmitManual(COFFEE2_DEVICE_IO_OUTPUT,
-				COFFEE2_ACTION_IO_WRITE, ucIndex,
-				((usValue & (uint16_t)(1U << ucIndex)) != 0U) ? 1U : 0U) == 0U) {
-				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
-			}
-		}
+	if (prvSubmitManual(COFFEE2_DEVICE_IO_OUTPUT,
+		COFFEE2_ACTION_IO_WRITE_MASK, usValue, 0U) == 0U) {
+		return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
 	}
 	return NMBS_ERROR_NONE;
 }
@@ -758,13 +770,27 @@ static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 			(uint32_t)COFFEE2_REG_EXTERNAL_IO_DEBUG + 1U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
 	}
-	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
+	if ((usAddress == COFFEE2_REG_LOCAL_IO_DEBUG) &&
+		((pusRegisters[0] & 0xFF00U) != 0U)) {
+		return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
+	}
+	if ((ucCoffee2OtaHttpIsActive() != 0U) ||
+		(xCoffee2WorkflowAcquireManual() != pdPASS)) {
+		(void)xCoffee2LogPrintfOrder(COFFEE2_LOG_LEVEL_WARNING,
+			COFFEE2_LOG_SOURCE_SERVER, COFFEE2_LOG_ORDER_DEBUG,
+			"IO debug rejected: automatic/maintenance/OTA owns outputs");
+		return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+	}
+	/* Queue remote work first so queue rejection cannot alter local pins. */
+	for (usIndex = usQuantity; usIndex > 0U; usIndex--) {
 		xResult = prvCommitIoDebugWrite(
-			(uint16_t)(usAddress + usIndex), pusRegisters[usIndex]);
+			(uint16_t)(usAddress + usIndex - 1U), pusRegisters[usIndex - 1U]);
 		if (xResult != NMBS_ERROR_NONE) {
+			vCoffee2WorkflowReleaseManual();
 			return xResult;
 		}
 	}
+	vCoffee2WorkflowReleaseManual();
 	return NMBS_ERROR_NONE;
 }
 
@@ -923,40 +949,6 @@ static void prvEvaluateOrder(void)
 	xResult = xCoffee2WorkflowSubmitOrder(&xOrder);
 	if (xResult == pdPASS) {
 		s_ucOrderLatched = 1U;
-		taskENTER_CRITICAL();
-		memset(s_ausOutputState, 0, sizeof(s_ausOutputState));
-		/* Only fields defined by the Coffee2 status protocol are copied. */
-		s_ausStatusRegisters[0x0000U] =
-			xOrder.ausRegister[COFFEE2_REG_ORDER_NUMBER];
-		s_ausStatusRegisters[0x0001U] =
-			xOrder.ausRegister[COFFEE2_REG_COFFEE_TYPE];
-		s_ausStatusRegisters[0x0002U] =
-			xOrder.ausRegister[COFFEE2_REG_LID_ENABLE];
-		s_ausStatusRegisters[0x0003U] =
-			xOrder.ausRegister[COFFEE2_REG_SYRUP_1];
-		s_ausStatusRegisters[0x0004U] =
-			xOrder.ausRegister[COFFEE2_REG_SYRUP_2];
-		s_ausStatusRegisters[0x0005U] =
-			xOrder.ausRegister[COFFEE2_REG_ICE_AMOUNT];
-		s_ausStatusRegisters[0x0006U] = 0U;
-		s_ausStatusRegisters[0x0007U] = 0U;
-		s_ausStatusRegisters[0x0009U] = 0U;
-		s_ausStatusRegisters[0x000AU] = 0U;
-		s_ausStatusRegisters[0x000BU] = 0U;
-		s_ausStatusRegisters[0x000CU] = 0U;
-		s_ausStatusRegisters[0x000DU] =
-			xOrder.ausRegister[COFFEE2_REG_ONLINE_OUTPUT];
-		s_ausStatusRegisters[0x000EU] =
-			xOrder.ausRegister[COFFEE2_REG_FRUIT_MILK_A];
-		s_ausStatusRegisters[0x000FU] =
-			xOrder.ausRegister[COFFEE2_REG_FRUIT_MILK_B];
-		s_ausStatusRegisters[0x0014U] =
-			xOrder.ausRegister[COFFEE2_REG_SYRUP_3];
-		s_ausStatusRegisters[0x0015U] =
-			xOrder.ausRegister[COFFEE2_REG_SYRUP_4];
-		s_ausStatusRegisters[COFFEE2_REG_PRODUCTION_STATUS -
-			COFFEE2_REG_STATUS_BASE] = COFFEE2_PRODUCTION_RUNNING;
-		taskEXIT_CRITICAL();
 		(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
 			COFFEE2_LOG_SOURCE_SERVER,
 			xOrder.ausRegister[COFFEE2_REG_ORDER_NUMBER],
@@ -986,9 +978,9 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 		(ulEndAddress > COFFEE2_REG_PICKUP_CONFIRM)) {
 		usValue = s_ausCommandRegisters[COFFEE2_REG_PICKUP_CONFIRM];
 		if (usValue == 0x0001U) {
-			vCoffee2ServerPublishOutput(1U, 0x0010U);
+			vCoffee2WorkflowConfirmPickup(1U);
 		} else if (usValue == 0x0010U) {
-			vCoffee2ServerPublishOutput(2U, 0x0010U);
+			vCoffee2WorkflowConfirmPickup(2U);
 		}
 		s_ausCommandRegisters[COFFEE2_REG_PICKUP_CONFIRM] = 0U;
 	}
@@ -1001,11 +993,10 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 	if ((usAddress <= COFFEE2_REG_CLEAR_ALARM) &&
 		(ulEndAddress > COFFEE2_REG_CLEAR_ALARM) &&
 		(s_ausCommandRegisters[COFFEE2_REG_CLEAR_ALARM] != 0U)) {
-		vCoffee2WorkflowAcknowledgeAlarm();
-		(void)prvSubmitManual(COFFEE2_DEVICE_ROBOT,
-			COFFEE2_ACTION_ROBOT_CLEAR_ALARM, 0U, 0U);
-		(void)prvSubmitManual(COFFEE2_DEVICE_COFFEE_MACHINE,
-			COFFEE2_ACTION_RESET, 0U, 0U);
+		if (prvSubmitManual(COFFEE2_DEVICE_ROBOT,
+			COFFEE2_ACTION_ROBOT_CLEAR_ALARM, 0U, 0U) != 0U) {
+			vCoffee2WorkflowAcknowledgeAlarm();
+		}
 		s_ausCommandRegisters[COFFEE2_REG_CLEAR_ALARM] = 0U;
 	}
 	if ((usAddress <= 0x0030U) && (ulEndAddress > 0x0030U)) {
@@ -1306,6 +1297,12 @@ static uint8_t prvSubmitManual(Coffee2DeviceId_e xDeviceId,
 {
 	Coffee2Command_t xCommand;
 
+	if ((xDeviceId == COFFEE2_DEVICE_ROBOT) &&
+		(xAction == COFFEE2_ACTION_ROBOT_STOP) &&
+		(g_xCoffee2WorkflowStatus.xState == COFFEE2_WORKFLOW_RUNNING)) {
+		vCoffee2WorkflowRequestCancel();
+		return 1U;
+	}
 	memset(&xCommand, 0, sizeof(xCommand));
 	xCommand.ucDeviceId = (uint8_t)xDeviceId;
 	xCommand.ucSource = (uint8_t)COFFEE2_COMMAND_SOURCE_SERVER;
@@ -1315,12 +1312,16 @@ static uint8_t prvSubmitManual(Coffee2DeviceId_e xDeviceId,
 	xCommand.ausParameter[1] = usParameter1;
 	xCommand.ulTimeoutMs = COFFEE2_WORKFLOW_DEFAULT_TIMEOUT_MS;
 	xCommand.ucRetryLimit = 1U;
+	if (xAction == COFFEE2_ACTION_IO_WRITE_MASK) {
+		xCommand.ulTimeoutMs = COFFEE2_RTU_IO_TIMEOUT_MS;
+		xCommand.ucRetryLimit = 0U;
+	}
 	if (((xDeviceId == COFFEE2_DEVICE_ROBOT) ?
 		xCoffee2CommandSubmitUrgent(&xCommand, 0U) :
 		xCoffee2CommandSubmit(&xCommand, 0U)) != pdPASS) {
 		(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_WARNING,
 			COFFEE2_LOG_SOURCE_SERVER, COFFEE2_LOG_ORDER_DEBUG,
-			"MANUAL_COMMAND_QUEUE_FULL",
+			"Manual rejected: automatic owner busy or queue full",
 			-1, "action", (int32_t)xAction);
 		return 0U;
 	}
@@ -1684,8 +1685,8 @@ static void prvRefreshStatusRegisters(void)
 	s_ausStatusRegisters[COFFEE2_REG_FRUIT_B_STATUS -
 		COFFEE2_REG_STATUS_BASE] =
 		g_xCoffee2WorkflowStatus.aucFruitState[1];
-	s_ausStatusRegisters[0x000BU] = s_ausOutputState[0];
-	s_ausStatusRegisters[0x000CU] = s_ausOutputState[1];
+	s_ausStatusRegisters[0x000BU] = g_xCoffee2WorkflowStatus.ausOutputState[0];
+	s_ausStatusRegisters[0x000CU] = g_xCoffee2WorkflowStatus.ausOutputState[1];
 	s_ausStatusRegisters[0x001AU] = usEnergyInteger;
 	s_ausStatusRegisters[0x001BU] = usEnergyFraction;
 	s_ausStatusRegisters[0x0023U] = usOutputCupMask;

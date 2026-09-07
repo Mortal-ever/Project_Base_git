@@ -302,6 +302,10 @@ void vCoffee2RtuBusTask(void *pvArgument)
 			(xResult == MODBUS_PORT_RESULT_OK) &&
 			(ucAttempt <= xCommand.ucRetryLimit);
 			ucAttempt++) {
+			if (ucCoffee2CommandIsCanceled(&xCommand) != 0U) {
+				xResult = MODBUS_PORT_RESULT_CANCELED;
+				break;
+			}
 			if (pxBinding->usMinimumIntervalMs != 0U) {
 				TickType_t xMinimumTicks;
 				TickType_t xElapsedTicks;
@@ -314,7 +318,9 @@ void vCoffee2RtuBusTask(void *pvArgument)
 					vTaskDelay(xMinimumTicks - xElapsedTicks);
 				}
 			}
-			xResult = prvExecute(pxContext, pxBinding, &xCommand);
+			xResult = (ucCoffee2CommandIsCanceled(&xCommand) != 0U) ?
+				MODBUS_PORT_RESULT_CANCELED :
+				prvExecute(pxContext, pxBinding, &xCommand);
 			pxContext->xLastTransactionTick = xTaskGetTickCount();
 			if (xResult == MODBUS_PORT_RESULT_OK) {
 				break;
@@ -330,7 +336,8 @@ void vCoffee2RtuBusTask(void *pvArgument)
 		pxStatus->lLastResult = (int32_t)xResult;
 		pxStatus->ulCommandCount++;
 		pxStatus->ucActiveDevice = 0U;
-		if (xResult != MODBUS_PORT_RESULT_OK) {
+		if ((xResult != MODBUS_PORT_RESULT_OK) &&
+			(xResult != MODBUS_PORT_RESULT_CANCELED)) {
 			pxStatus->ulErrorCount++;
 			prvLogCommandFailure(&xCommand, xResult);
 		}
@@ -395,6 +402,8 @@ static ModbusPortResult_e prvExecute(Coffee2RtuBusContext_t *pxContext,
 	CoffeeMachineF200Result_e xF200Result;
 	CoffeeMachineF200Action_e xF200Action;
 	uint8_t ucDrinkId;
+	uint8_t ucPoint;
+	uint8_t ucValue;
 
 	memset(&xIoImage, 0, sizeof(xIoImage));
 	memset(&xCupLidImage, 0, sizeof(xCupLidImage));
@@ -530,6 +539,32 @@ static ModbusPortResult_e prvExecute(Coffee2RtuBusContext_t *pxContext,
 		return xResult;
 
 	case COFFEE2_DEVICE_IO_OUTPUT:
+		if (pxCommand->usAction == COFFEE2_ACTION_IO_WRITE_MASK) {
+			xResult = xIoModuleModbusReadOutputs(pxContext->pxPort,
+				pxBinding->ucUnitId, 0U, COFFEE2_EXTERNAL_IO_POINT_COUNT,
+				pxCommand->ulTimeoutMs, &xIoImage);
+			for (ucPoint = 0U; (xResult == MODBUS_PORT_RESULT_OK) &&
+				(ucPoint < COFFEE2_EXTERNAL_IO_POINT_COUNT); ucPoint++) {
+				ucValue = (uint8_t)((pxCommand->ausParameter[0] >> ucPoint) & 1U);
+				if (xIoImage.aucPoints[ucPoint] != ucValue) {
+					xResult = xIoModuleModbusWriteOutput(pxContext->pxPort,
+						pxBinding->ucUnitId, 0U, ucPoint, ucValue,
+						COFFEE2_EXTERNAL_IO_POINT_COUNT,
+						pxCommand->ulTimeoutMs, &xIoImage);
+				}
+			}
+			if ((xIoImage.ucPointCount == COFFEE2_EXTERNAL_IO_POINT_COUNT) &&
+				((xResult == MODBUS_PORT_RESULT_OK) ||
+				 (xResult == MODBUS_PORT_RESULT_PROTOCOL))) {
+				vCoffee2IoCommitModbusOutputImage(xIoImage.aucPoints);
+			}
+			(void)xCoffee2LogPrintfOrder((xResult == MODBUS_PORT_RESULT_OK) ?
+				COFFEE2_LOG_LEVEL_INFO : COFFEE2_LOG_LEVEL_ERROR,
+				COFFEE2_LOG_SOURCE_IO_OUTPUT, (uint16_t)pxCommand->ulOrderId,
+				"Output mask 0x%04X: result=%ld (readback verified on success)",
+				(unsigned int)pxCommand->ausParameter[0], (long)xResult);
+			return xResult;
+		}
 		if (pxCommand->usAction == COFFEE2_ACTION_REFRESH) {
 			xResult = xIoModuleModbusReadOutputs(pxContext->pxPort,
 				pxBinding->ucUnitId, 0U, COFFEE2_EXTERNAL_IO_POINT_COUNT,
@@ -547,8 +582,9 @@ static ModbusPortResult_e prvExecute(Coffee2RtuBusContext_t *pxContext,
 			(pxCommand->ausParameter[1] != 0U) ? 1U : 0U,
 			COFFEE2_EXTERNAL_IO_POINT_COUNT, pxCommand->ulTimeoutMs, &xIoImage);
 		prvLogIoWrite(pxCommand, xResult, &xIoImage);
-		if ((xResult == MODBUS_PORT_RESULT_OK) ||
-			(xResult == MODBUS_PORT_RESULT_PROTOCOL)) {
+		if ((xIoImage.ucPointCount == COFFEE2_EXTERNAL_IO_POINT_COUNT) &&
+			((xResult == MODBUS_PORT_RESULT_OK) ||
+			 (xResult == MODBUS_PORT_RESULT_PROTOCOL))) {
 			vCoffee2IoCommitModbusOutputImage(xIoImage.aucPoints);
 		}
 		return xResult;
@@ -625,18 +661,9 @@ static Coffee2LogSource_e prvGetDeviceLogSource(uint8_t ucDeviceId)
 /*-----------------------------------------------------------*/
 static const char *prvGetDeviceName(uint8_t ucDeviceId)
 {
-	switch ((Coffee2DeviceId_e)ucDeviceId) {
-	case COFFEE2_DEVICE_COFFEE_MACHINE: return "COFFEE_MACHINE";
-	case COFFEE2_DEVICE_CUP_MACHINE: return "CUP_MACHINE";
-	case COFFEE2_DEVICE_SYRUP_MACHINE: return "SYRUP_MACHINE";
-	case COFFEE2_DEVICE_LID_MACHINE: return "LID_MACHINE";
-	case COFFEE2_DEVICE_ICE_MACHINE: return "ICE_MACHINE";
-	case COFFEE2_DEVICE_SCALE: return "SCALE_MODULE";
-	case COFFEE2_DEVICE_POWER_METER: return "POWER_METER";
-	case COFFEE2_DEVICE_IO_INPUT: return "IO_INPUT_MODULE_16CH";
-	case COFFEE2_DEVICE_IO_OUTPUT: return "IO_OUTPUT_MODULE_16CH";
-	default: return "DEVICE";
-	}
+	const Coffee2DeviceBinding_t *pxBinding;
+	pxBinding = pxCoffee2DeviceGetBinding((Coffee2DeviceId_e)ucDeviceId);
+	return (pxBinding != NULL) ? pxBinding->pcName : "Unknown";
 }
 
 /*-----------------------------------------------------------*/

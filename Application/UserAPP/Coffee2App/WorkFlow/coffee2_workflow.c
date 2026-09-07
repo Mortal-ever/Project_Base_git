@@ -91,6 +91,10 @@ COFFEE2_CCM_DATA
 static uint32_t s_ulNextOrderEpoch;
 COFFEE2_CCM_DATA
 static uint8_t s_ucManualOverride;
+static uint16_t s_usManualReservations;
+static uint8_t s_ucMaintenanceActive;
+static uint8_t s_ucPickupPending;
+static uint16_t s_usActiveDevices;
 COFFEE2_CCM_DATA
 static Coffee2HotWaterContext_t s_xHotWater;
 COFFEE2_CCM_DATA
@@ -190,6 +194,108 @@ static void prvPublish(Coffee2WorkflowState_e xState,
 	uint16_t usStep, int32_t lError);
 static uint8_t prvQueuePendingOrder(void);
 static uint8_t prvRobotPositionAction(Coffee2Action_e xAction);
+static void prvServicePickup(void);
+static void prvPublishOutput(uint16_t usOutput, uint16_t usState);
+static int32_t prvCheckOutputEmpty(uint16_t usOutput);
+
+/*-----------------------------------------------------------*/
+BaseType_t xCoffee2WorkflowAcquireManual(void)
+{
+	BaseType_t xResult;
+
+	xResult = pdFAIL;
+	taskENTER_CRITICAL();
+	if ((g_xCoffee2WorkflowStatus.ucRecoveryRequired == 0U) &&
+		(g_xCoffee2WorkflowStatus.xMachineState !=
+		COFFEE2_MACHINE_INITIALIZING) &&
+		(g_xCoffee2WorkflowStatus.xState != COFFEE2_WORKFLOW_RUNNING) &&
+		(g_xCoffee2WorkflowStatus.xState != COFFEE2_WORKFLOW_CANCELING) &&
+		(s_ucMaintenanceActive == 0U) && (s_xMaintenance.ucPending == 0U) &&
+		(s_ucManualIcePending == 0U) &&
+		(s_xHotWater.ucPhase == COFFEE2_HOT_WATER_IDLE) &&
+		(s_xHotWater.ucIoPending == 0U) &&
+		((g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen != 0U) ||
+		 ((s_ucInitializationComplete == 0U) &&
+		  (g_xCoffee2WorkflowStatus.xMachineState == COFFEE2_MACHINE_ALARM)))) {
+		s_usManualReservations++;
+		xResult = pdPASS;
+	}
+	taskEXIT_CRITICAL();
+	return xResult;
+}
+
+/*-----------------------------------------------------------*/
+void vCoffee2WorkflowReleaseManual(void)
+{
+	taskENTER_CRITICAL();
+	if (s_usManualReservations != 0U) {
+		s_usManualReservations--;
+	}
+	taskEXIT_CRITICAL();
+}
+
+/*-----------------------------------------------------------*/
+void vCoffee2WorkflowConfirmPickup(uint16_t usOutput)
+{
+	if ((usOutput < 1U) || (usOutput > 2U)) {
+		return;
+	}
+	taskENTER_CRITICAL();
+	if (g_xCoffee2WorkflowStatus.ausOutputState[usOutput - 1U] == 5U) {
+		s_ucPickupPending |= (uint8_t)(1U << (usOutput - 1U));
+	}
+	taskEXIT_CRITICAL();
+}
+
+/*-----------------------------------------------------------*/
+static void prvServicePickup(void)
+{
+	uint8_t ucIndex;
+	uint8_t ucPending;
+
+	taskENTER_CRITICAL();
+	ucPending = s_ucPickupPending;
+	s_ucPickupPending = 0U;
+	for (ucIndex = 0U; ucIndex < 2U; ucIndex++) {
+		if (((ucPending & (1U << ucIndex)) != 0U) &&
+			(g_xCoffee2WorkflowStatus.ausOutputState[ucIndex] == 5U)) {
+			g_xCoffee2WorkflowStatus.ausOutputState[ucIndex] = 0x10U;
+		}
+	}
+	taskEXIT_CRITICAL();
+}
+
+/*-----------------------------------------------------------*/
+static void prvPublishOutput(uint16_t usOutput, uint16_t usState)
+{
+	taskENTER_CRITICAL();
+	g_xCoffee2WorkflowStatus.ausOutputState[usOutput - 1U] = usState;
+	if (usState == 2U) {
+		g_xCoffee2WorkflowStatus.ausOutputOrderId[usOutput - 1U] =
+			g_xCoffee2WorkflowStatus.usCurrentOrderId;
+	}
+	taskEXIT_CRITICAL();
+	vCoffee2ServerPublishOutput(usOutput, usState);
+}
+
+/*-----------------------------------------------------------*/
+static int32_t prvCheckOutputEmpty(uint16_t usOutput)
+{
+	int32_t lResult;
+
+	prvServicePickup();
+	if ((g_xCoffee2WorkflowStatus.ausOutputState[usOutput - 1U] == 2U) ||
+		(g_xCoffee2WorkflowStatus.ausOutputState[usOutput - 1U] == 5U)) {
+		return COFFEE2_WORKFLOW_ERROR_INIT_OCCUPIED;
+	}
+	lResult = prvRefreshDeviceQuiet(29U, COFFEE2_DEVICE_IO_INPUT);
+	if (lResult != 0) {
+		return lResult;
+	}
+	return (prvBusinessConditionActive((usOutput == 1U) ?
+		COFFEE2_CONDITION_OUTPUT_1 : COFFEE2_CONDITION_OUTPUT_2) != 0U) ?
+		COFFEE2_WORKFLOW_ERROR_INIT_OCCUPIED : 0;
+}
 
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee2WorkflowInitialize(void)
@@ -202,6 +308,10 @@ BaseType_t xCoffee2WorkflowInitialize(void)
 	s_ucPendingOrder = 0U;
 	s_ulNextOrderEpoch = 0U;
 	s_ucManualOverride = 0U;
+	s_usManualReservations = 0U;
+	s_ucMaintenanceActive = 0U;
+	s_ucPickupPending = 0U;
+	s_usActiveDevices = 0U;
 	memset(&s_xHotWater, 0, sizeof(s_xHotWater));
 	memset(&s_xMaintenance, 0, sizeof(s_xMaintenance));
 	s_ucInitializationAcknowledged = 0U;
@@ -228,11 +338,14 @@ BaseType_t xCoffee2WorkflowSubmitMaintenance(
 	}
 	xResult = pdFAIL;
 	taskENTER_CRITICAL();
-	if (s_xMaintenance.ucPending == 0U) {
+	if ((s_xMaintenance.ucPending == 0U) &&
+		(s_usManualReservations == 0U) &&
+		(g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen != 0U)) {
 		s_xMaintenance.xType = xType;
 		s_xMaintenance.usParameter0 = usParameter0;
 		s_xMaintenance.usParameter1 = usParameter1;
 		s_xMaintenance.ucPending = 1U;
+		g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen = 0U;
 		xResult = pdPASS;
 	}
 	taskEXIT_CRITICAL();
@@ -256,7 +369,10 @@ BaseType_t xCoffee2WorkflowSetHotWater(uint8_t ucStart,
 		return pdFAIL;
 	}
 	taskENTER_CRITICAL();
-	if ((s_xHotWater.ucPhase != COFFEE2_HOT_WATER_IDLE) ||
+	if ((s_ucInitializationComplete == 0U) ||
+		(g_xCoffee2WorkflowStatus.ucRecoveryRequired != 0U) ||
+		(s_usManualReservations != 0U) ||
+		(s_xHotWater.ucPhase != COFFEE2_HOT_WATER_IDLE) ||
 		(s_xHotWater.ucIoPending != 0U)) {
 		taskEXIT_CRITICAL();
 		return pdFAIL;
@@ -280,7 +396,8 @@ void vCoffee2WorkflowAcknowledgeAlarm(void)
 		g_xCoffee2WorkflowStatus.ucHotWaterState =
 			COFFEE2_MAINTENANCE_IDLE;
 	}
-	if (g_xCoffee2WorkflowStatus.xState != COFFEE2_WORKFLOW_RUNNING) {
+	if ((g_xCoffee2WorkflowStatus.ucRecoveryRequired == 0U) &&
+		(g_xCoffee2WorkflowStatus.xState != COFFEE2_WORKFLOW_RUNNING)) {
 		g_xCoffee2WorkflowStatus.xMachineState =
 			(s_ucInitializationComplete != 0U) ? COFFEE2_MACHINE_IDLE :
 				COFFEE2_MACHINE_INITIALIZING;
@@ -298,6 +415,10 @@ BaseType_t xCoffee2WorkflowSubmitOrder(const Coffee2Order_t *pxOrder)
 	}
 	taskENTER_CRITICAL();
 	if ((s_ucManualIcePending != 0U) ||
+		(s_ucPendingOrder != 0U) ||
+		(s_ucMaintenanceActive != 0U) || (s_xMaintenance.ucPending != 0U) ||
+		(s_usManualReservations != 0U) ||
+		(g_xCoffee2WorkflowStatus.ucRecoveryRequired != 0U) ||
 		((g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen == 0U) &&
 			(g_xCoffee2WorkflowStatus.xState !=
 				COFFEE2_WORKFLOW_RUNNING) &&
@@ -355,6 +476,7 @@ BaseType_t xCoffee2WorkflowSubmitManualIce(uint16_t usTargetWeight)
 	xResult = pdFAIL;
 	taskENTER_CRITICAL();
 	if ((s_ucManualIcePending == 0U) &&
+		(s_usManualReservations == 0U) &&
 		(g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen != 0U)) {
 		s_usManualIceWeight = usTargetWeight;
 		s_ucManualIcePending = 1U;
@@ -398,8 +520,15 @@ void vCoffee2WorkflowTask(void *pvArgument)
 	vTaskDelay(pdMS_TO_TICKS(500U));
 	lLastInitError = 0;
 	for (;;) {
+		taskENTER_CRITICAL();
+		if (s_usManualReservations != 0U) {
+			taskEXIT_CRITICAL();
+			prvDelayWithServices(100U);
+			continue;
+		}
 		g_xCoffee2WorkflowStatus.xMachineState =
 			COFFEE2_MACHINE_INITIALIZING;
+		taskEXIT_CRITICAL();
 		lResult = prvRunInitialization();
 		if (lResult == 0) {
 			s_usLastInitializationFailure = 0xFFFFU;
@@ -445,6 +574,7 @@ void vCoffee2WorkflowTask(void *pvArgument)
 			if (s_ucManualIcePending != 0U) {
 				usManualIceWeight = s_usManualIceWeight;
 				s_ucManualIcePending = 0U;
+				s_ucMaintenanceActive = 1U;
 			} else {
 				usManualIceWeight = 0U;
 			}
@@ -452,18 +582,20 @@ void vCoffee2WorkflowTask(void *pvArgument)
 				(s_xMaintenance.ucPending != 0U)) {
 				xMaintenance = s_xMaintenance;
 				s_xMaintenance.ucPending = 0U;
+				s_ucMaintenanceActive = 1U;
 			}
 			taskEXIT_CRITICAL();
 			if (usManualIceWeight != 0U) {
+				s_usActiveDevices = 0U;
 				taskENTER_CRITICAL();
 				s_ulNextOrderEpoch++;
 				if (s_ulNextOrderEpoch == 0U) {
 					s_ulNextOrderEpoch = 1U;
 				}
-			g_xCoffee2WorkflowStatus.ulOrderEpoch =
-				s_ulNextOrderEpoch;
-			g_xCoffee2WorkflowStatus.usCurrentOrderId =
-				COFFEE2_LOG_ORDER_DEBUG;
+				g_xCoffee2WorkflowStatus.ulOrderEpoch =
+					s_ulNextOrderEpoch;
+				g_xCoffee2WorkflowStatus.usCurrentOrderId =
+					COFFEE2_LOG_ORDER_DEBUG;
 				g_xCoffee2WorkflowStatus.ucCancelRequested = 0U;
 				taskEXIT_CRITICAL();
 				(void)xCoffee2LogWriteFieldOrder(
@@ -488,12 +620,13 @@ void vCoffee2WorkflowTask(void *pvArgument)
 						(int32_t)usManualIceWeight);
 				} else {
 					lSafetyResult = prvAbortDevices();
+					g_xCoffee2WorkflowStatus.lSafetyResult = lSafetyResult;
 					if (lSafetyResult == 0) {
 						taskENTER_CRITICAL();
 						g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen = 1U;
 						taskEXIT_CRITICAL();
 					} else {
-						lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
+						g_xCoffee2WorkflowStatus.ucRecoveryRequired = 1U;
 					}
 					prvPublish(COFFEE2_WORKFLOW_FAILED,
 						g_xCoffee2WorkflowStatus.usCurrentStep,
@@ -507,13 +640,37 @@ void vCoffee2WorkflowTask(void *pvArgument)
 							g_xCoffee2WorkflowStatus.usCurrentStep);
 				}
 			}
+			if (usManualIceWeight != 0U) {
+				s_ucMaintenanceActive = 0U;
+			}
 			if (xMaintenance.xType != COFFEE2_MAINTENANCE_NONE) {
+				s_usActiveDevices = 0U;
+				taskENTER_CRITICAL();
+				s_ulNextOrderEpoch++;
+				if (s_ulNextOrderEpoch == 0U) {
+					s_ulNextOrderEpoch = 1U;
+				}
+				g_xCoffee2WorkflowStatus.ulOrderEpoch = s_ulNextOrderEpoch;
+				g_xCoffee2WorkflowStatus.usCurrentOrderId = COFFEE2_LOG_ORDER_DEBUG;
+				g_xCoffee2WorkflowStatus.ucCancelRequested = 0U;
+				taskEXIT_CRITICAL();
 				g_xCoffee2WorkflowStatus.xMachineState =
 					COFFEE2_MACHINE_BUSY;
 				lResult = prvRunMaintenance(&xMaintenance);
+				if (lResult != 0) {
+					g_xCoffee2WorkflowStatus.lSafetyResult = prvAbortDevices();
+					g_xCoffee2WorkflowStatus.ucRecoveryRequired = 1U;
+				}
+				taskENTER_CRITICAL();
+				s_ucMaintenanceActive = 0U;
+				g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen =
+					(lResult == 0) ? 1U : 0U;
+				taskEXIT_CRITICAL();
 				g_xCoffee2WorkflowStatus.xMachineState =
 					(lResult == 0) ? COFFEE2_MACHINE_IDLE :
-					COFFEE2_MACHINE_ALARM;
+						COFFEE2_MACHINE_ALARM;
+				g_xCoffee2WorkflowStatus.xState = (lResult == 0) ?
+					COFFEE2_WORKFLOW_IDLE : COFFEE2_WORKFLOW_FAILED;
 				(void)xCoffee2LogWriteFieldOrder(
 					(lResult == 0) ? COFFEE2_LOG_LEVEL_INFO :
 						COFFEE2_LOG_LEVEL_ERROR,
@@ -536,7 +693,16 @@ void vCoffee2WorkflowTask(void *pvArgument)
 			xOrder.ausRegister[COFFEE2_REG_ORDER_NUMBER];
 		g_xCoffee2WorkflowStatus.ucCancelRequested = 0U;
 		s_ucManualOverride = 0U;
+		s_usActiveDevices = 0U;
+		g_xCoffee2WorkflowStatus.ucPositionUncertain = 0U;
+		g_xCoffee2WorkflowStatus.ucCommandSent = 0U;
+		g_xCoffee2WorkflowStatus.ucDeviceDone = 0U;
+		g_xCoffee2WorkflowStatus.ucPhysicalVerified = 0U;
+		g_xCoffee2WorkflowStatus.lSafetyResult = 0;
+		g_xCoffee2WorkflowStatus.usActiveOutput =
+			xOrder.ausRegister[COFFEE2_REG_ONLINE_OUTPUT];
 		taskEXIT_CRITICAL();
+		vCoffee2ServerPublishOrder(&xOrder);
 		prvPublish(COFFEE2_WORKFLOW_RUNNING, 1U, 0);
 		(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
 			COFFEE2_LOG_SOURCE_WORKFLOW,
@@ -545,6 +711,7 @@ void vCoffee2WorkflowTask(void *pvArgument)
 			"order", (int32_t)g_xCoffee2WorkflowStatus.usCurrentOrderId);
 		lResult = prvRunOrder(&xOrder);
 		if (lResult == 0) {
+			g_xCoffee2WorkflowStatus.ucPositionUncertain = 0U;
 			if (prvQueuePendingOrder() == 0U) {
 				taskENTER_CRITICAL();
 				g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen = 1U;
@@ -566,14 +733,24 @@ void vCoffee2WorkflowTask(void *pvArgument)
 			g_xCoffee2WorkflowStatus.ulFailedOrderCount++;
 			taskEXIT_CRITICAL();
 			lSafetyResult = prvAbortDevices();
-			if (lSafetyResult == 0) {
+			g_xCoffee2WorkflowStatus.lSafetyResult = lSafetyResult;
+			if ((lSafetyResult == 0) &&
+				(g_xCoffee2WorkflowStatus.ucPositionUncertain == 0U)) {
 				if (prvQueuePendingOrder() == 0U) {
 					taskENTER_CRITICAL();
 					g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen = 1U;
 					taskEXIT_CRITICAL();
 				}
 			} else {
-				lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
+				g_xCoffee2WorkflowStatus.ucRecoveryRequired = 1U;
+				g_xCoffee2WorkflowStatus.ucOrderAdmissionOpen = 0U;
+				s_ucPendingOrder = 0U;
+				(void)xCoffee2LogPrintfOrder(COFFEE2_LOG_LEVEL_ERROR,
+					COFFEE2_LOG_SOURCE_WORKFLOW,
+					g_xCoffee2WorkflowStatus.usCurrentOrderId,
+					"Recovery locked: stop=%ld position_unknown=%u; inspect/reset",
+					(long)lSafetyResult,
+					(unsigned int)g_xCoffee2WorkflowStatus.ucPositionUncertain);
 			}
 			prvPublish(COFFEE2_WORKFLOW_FAILED,
 				g_xCoffee2WorkflowStatus.usCurrentStep, lResult);
@@ -645,14 +822,18 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 	uint8_t ucOrderStep;
 	uint16_t usLogOrder;
 	uint8_t ucInitializationStep;
+	uint8_t ucResultValid;
+	int32_t lCommandResult;
+	const Coffee2DeviceBinding_t *pxBinding;
 
 	ucOrderStep = (usStep < 0xF000U) ? 1U : 0U;
+	pxBinding = pxCoffee2DeviceGetBinding(xDeviceId);
 	ucInitializationStep = ((usStep >= 0xFD00U) &&
 		(usStep < 0xFE00U)) ? 1U : 0U;
 	usLogOrder = (ucOrderStep != 0U) ?
 		g_xCoffee2WorkflowStatus.usCurrentOrderId :
 		COFFEE2_LOG_ORDER_DEBUG;
-	if ((ucOrderStep != 0U) &&
+	if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 		(g_xCoffee2WorkflowStatus.ucCancelRequested != 0U)) {
 		return COFFEE2_WORKFLOW_ERROR_CANCELED;
 	}
@@ -664,11 +845,17 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 			(int32_t)xAction, "step", (int32_t)usStep);
 	}
 	if (ucOrderStep != 0U) {
+		g_xCoffee2WorkflowStatus.ucDeviceId = (uint8_t)xDeviceId;
+		g_xCoffee2WorkflowStatus.usAction = (uint16_t)xAction;
+		g_xCoffee2WorkflowStatus.ucCommandSent = 0U;
+		g_xCoffee2WorkflowStatus.ucDeviceDone = 0U;
+		g_xCoffee2WorkflowStatus.ucPhysicalVerified = 0U;
 		prvPublish(COFFEE2_WORKFLOW_RUNNING, usStep, 0);
 	}
 	memset(&xCommand, 0, sizeof(xCommand));
 	xCommand.ulOrderId = usLogOrder;
-	xCommand.ulOrderEpoch = (ucOrderStep != 0U) ?
+	xCommand.ulOrderEpoch = ((ucOrderStep != 0U) ||
+		(s_ucMaintenanceActive != 0U)) ?
 		g_xCoffee2WorkflowStatus.ulOrderEpoch : 0U;
 	xCommand.usStepId = usStep;
 	xCommand.usAction = (uint16_t)xAction;
@@ -682,7 +869,8 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 		xCommand.ulTimeoutMs = COFFEE2_RTU_IO_TIMEOUT_MS;
 	}
 	xCommand.ucDeviceId = (uint8_t)xDeviceId;
-	xCommand.ucSource = (ucOrderStep != 0U) ?
+	xCommand.ucSource = ((ucOrderStep != 0U) ||
+		(s_ucMaintenanceActive != 0U)) ?
 		(uint8_t)COFFEE2_COMMAND_SOURCE_WORKFLOW :
 		(uint8_t)COFFEE2_COMMAND_SOURCE_MAINTENANCE;
 	xCommand.ucRetryLimit = 1U;
@@ -696,6 +884,17 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 		return COFFEE2_WORKFLOW_ERROR_QUEUE;
 	}
 	xStartTick = xTaskGetTickCount();
+	if (ucOrderStep != 0U) {
+		g_xCoffee2WorkflowStatus.ucCommandSent = 1U;
+		if ((xDeviceId == COFFEE2_DEVICE_ROBOT) &&
+			(prvRobotPositionAction(xAction) != 0U)) {
+			g_xCoffee2WorkflowStatus.ucPositionUncertain = 1U;
+		}
+	}
+	if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
+		(xAction != COFFEE2_ACTION_REFRESH)) {
+		s_usActiveDevices |= (uint16_t)(1U << (uint8_t)xDeviceId);
+	}
 	xTimeoutTicks = pdMS_TO_TICKS((xDeviceId == COFFEE2_DEVICE_ROBOT) ?
 		ulTimeoutMs : (ulTimeoutMs +
 			(4U * COFFEE2_WORKFLOW_DEVICE_IO_TIMEOUT_MS)));
@@ -732,6 +931,9 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 			return COFFEE2_WORKFLOW_ERROR_CANCELED;
 		}
 		if ((xEvents & COFFEE2_DEVICE_EVENT_COMMAND_DONE) != 0U) {
+			if (ucOrderStep != 0U) {
+				g_xCoffee2WorkflowStatus.ucDeviceDone = 1U;
+			}
 			if (ucInitializationStep == 0U) {
 				(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
 					COFFEE2_LOG_SOURCE_WORKFLOW,
@@ -742,6 +944,11 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 			return 0;
 		}
 		if ((xEvents & COFFEE2_DEVICE_EVENT_TERMINAL) != 0U) {
+			lCommandResult = lCoffee2DeviceGetTerminalResult(xDeviceId,
+				xCommand.ulOrderEpoch, xCommand.ulCommandId, &ucResultValid);
+			if (ucResultValid == 0U) {
+				lCommandResult = COFFEE2_WORKFLOW_ERROR_DEVICE;
+			}
 			if (ucInitializationStep != 0U) {
 				if (s_usLastInitializationFailure != usStep) {
 					const char *pcDeviceName;
@@ -764,20 +971,21 @@ static int32_t prvRunStep(uint16_t usStep, Coffee2DeviceId_e xDeviceId,
 						COFFEE2_LOG_ORDER_SYSTEM,
 						"%s_INIT_FAILED_RESULT=%ld",
 						pcDeviceName,
-						(long)g_axCoffee2DeviceStatus[xDeviceId].lLastResult);
+						(long)lCommandResult);
 					s_usLastInitializationFailure = usStep;
 				}
 			} else {
-				(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_ERROR,
+				(void)xCoffee2LogPrintfOrder(COFFEE2_LOG_LEVEL_ERROR,
 					COFFEE2_LOG_SOURCE_WORKFLOW,
 					usLogOrder,
-					"WORKFLOW_STEP_DEVICE_FAILED",
-					g_axCoffee2DeviceStatus[xDeviceId].lLastResult, "step",
-					(int32_t)usStep);
+					"Step %u %s failed: action=%u result=%ld",
+					(unsigned int)usStep,
+					(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+					(unsigned int)xAction, (long)lCommandResult);
 			}
 			return COFFEE2_WORKFLOW_ERROR_DEVICE;
 		}
-		if ((ucOrderStep != 0U) &&
+		if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 			(g_xCoffee2WorkflowStatus.ucCancelRequested != 0U)) {
 			(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_WARNING,
 				COFFEE2_LOG_SOURCE_WORKFLOW,
@@ -863,7 +1071,7 @@ static int32_t prvRunOrder(const Coffee2Order_t *pxOrder)
 		(pxOrder->ausRegister[COFFEE2_REG_SYRUP_4] != 0U)) ? 1U : 0U;
 	lResult = prvRunStep(10U, COFFEE2_DEVICE_ROBOT,
 		COFFEE2_ACTION_REFRESH, 0U, 0U, 3000U);
-	if (lResult == 0) {
+	if ((lResult == 0) && (ucNeedCoffeeStation != 0U)) {
 		lResult = prvRunStep(20U, COFFEE2_DEVICE_COFFEE_MACHINE,
 			COFFEE2_ACTION_REFRESH, 0U, 0U, 3000U);
 	}
@@ -887,6 +1095,9 @@ static int32_t prvRunOrder(const Coffee2Order_t *pxOrder)
 	if ((lResult == 0) && (usIceAmount != 0U)) {
 		lResult = prvRunStep(28U, COFFEE2_DEVICE_ICE_MACHINE,
 			COFFEE2_ACTION_REFRESH, 0U, 0U, 3000U);
+	}
+	if (lResult == 0) {
+		lResult = prvCheckOutputEmpty(usOutput);
 	}
 	if (lResult == 0) {
 		lResult = prvRunStep(30U, COFFEE2_DEVICE_ROBOT,
@@ -1048,12 +1259,15 @@ static int32_t prvRunOrder(const Coffee2Order_t *pxOrder)
 		}
 	}
 	if (lResult == 0) {
-		vCoffee2ServerPublishOutput(usOutput, 2U);
+		lResult = prvCheckOutputEmpty(usOutput);
+	}
+	if (lResult == 0) {
+		prvPublishOutput(usOutput, 2U);
 		lResult = prvRunStep(180U, COFFEE2_DEVICE_ROBOT,
 			COFFEE2_ACTION_ROBOT_PUT_OUTPUT,
 			usOutput, 0U, COFFEE2_WORKFLOW_ROBOT_MOTION_MS);
 		if (lResult != 0) {
-			vCoffee2ServerPublishOutput(usOutput, 3U);
+			prvPublishOutput(usOutput, 3U);
 		}
 	}
 	if (lResult == 0) {
@@ -1061,7 +1275,9 @@ static int32_t prvRunOrder(const Coffee2Order_t *pxOrder)
 			(usOutput == 1U) ? COFFEE2_CONDITION_OUTPUT_1 :
 				COFFEE2_CONDITION_OUTPUT_2);
 		if (lResult == 0) {
-			vCoffee2ServerPublishOutput(usOutput, 5U);
+			prvPublishOutput(usOutput, 5U);
+		} else {
+			prvPublishOutput(usOutput, 3U);
 		}
 	}
 	if (lResult == 0) {
@@ -1606,7 +1822,8 @@ static int32_t prvRefreshDeviceQuiet(uint16_t usStep,
 	memset(&xCommand, 0, sizeof(xCommand));
 	xCommand.ulOrderId = (ucOrderStep != 0U) ?
 		g_xCoffee2WorkflowStatus.usCurrentOrderId : COFFEE2_LOG_ORDER_DEBUG;
-	xCommand.ulOrderEpoch = (ucOrderStep != 0U) ?
+	xCommand.ulOrderEpoch = ((ucOrderStep != 0U) ||
+		(s_ucMaintenanceActive != 0U)) ?
 		g_xCoffee2WorkflowStatus.ulOrderEpoch : 0U;
 	xCommand.usStepId = usStep;
 	xCommand.usAction = (uint16_t)COFFEE2_ACTION_REFRESH;
@@ -1615,7 +1832,8 @@ static int32_t prvRefreshDeviceQuiet(uint16_t usStep,
 			COFFEE2_WORKFLOW_DEVICE_IO_TIMEOUT_MS :
 			COFFEE2_RTU_IO_TIMEOUT_MS;
 	xCommand.ucDeviceId = (uint8_t)xDeviceId;
-	xCommand.ucSource = (ucOrderStep != 0U) ?
+	xCommand.ucSource = ((ucOrderStep != 0U) ||
+		(s_ucMaintenanceActive != 0U)) ?
 		(uint8_t)COFFEE2_COMMAND_SOURCE_WORKFLOW :
 		(uint8_t)COFFEE2_COMMAND_SOURCE_MAINTENANCE;
 	xCommand.ucRetryLimit = 1U;
@@ -1637,7 +1855,7 @@ static int32_t prvRefreshDeviceQuiet(uint16_t usStep,
 			return (ucTerminalValid != 0U) ? lTerminalResult :
 				COFFEE2_WORKFLOW_ERROR_DEVICE;
 		}
-		if ((ucOrderStep != 0U) &&
+		if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 			(g_xCoffee2WorkflowStatus.ucCancelRequested != 0U)) {
 			return COFFEE2_WORKFLOW_ERROR_CANCELED;
 		}
@@ -1715,6 +1933,7 @@ static int32_t prvWaitBusinessCondition(uint16_t usStep,
 			return lResult;
 		}
 		if (prvBusinessConditionActive(ucCondition) != 0U) {
+			g_xCoffee2WorkflowStatus.ucPhysicalVerified = 1U;
 			(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
 				COFFEE2_LOG_SOURCE_WORKFLOW,
 				g_xCoffee2WorkflowStatus.usCurrentOrderId,
@@ -1768,7 +1987,7 @@ static int32_t prvWaitDeviceReportedComplete(uint16_t usStep,
 		prvPublish(COFFEE2_WORKFLOW_RUNNING, usStep, 0);
 	}
 	for (;;) {
-		if ((ucOrderStep != 0U) &&
+		if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 			(g_xCoffee2WorkflowStatus.ucCancelRequested != 0U)) {
 			return COFFEE2_WORKFLOW_ERROR_CANCELED;
 		}
@@ -1784,6 +2003,7 @@ static int32_t prvWaitDeviceReportedComplete(uint16_t usStep,
 			g_xCoffee2CoffeeMachineImage.ausStatus[ucStatusIndex] :
 			g_xCoffee2SyrupImage.ausRegisters[ucStatusIndex];
 		if (usState == usSuccessValue) {
+			s_usActiveDevices &= (uint16_t)~(1U << (uint8_t)xDeviceId);
 			(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
 				COFFEE2_LOG_SOURCE_WORKFLOW, usLogOrder,
 				"DEVICE_ACTION_COMPLETE", 0,
@@ -1805,7 +2025,7 @@ static int32_t prvWaitDeviceReportedComplete(uint16_t usStep,
 				"device", (int32_t)xDeviceId);
 		}
 		for (ucDelayIndex = 0U; ucDelayIndex < 5U; ucDelayIndex++) {
-			if ((ucOrderStep != 0U) &&
+			if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 				(g_xCoffee2WorkflowStatus.ucCancelRequested != 0U)) {
 				return COFFEE2_WORKFLOW_ERROR_CANCELED;
 			}
@@ -2071,6 +2291,7 @@ static int32_t prvAbortDevices(void)
 	for (ucIndex = 0U; ucIndex < 3U; ucIndex++) {
 		axCommand[ucIndex].ucSource =
 			(uint8_t)COFFEE2_COMMAND_SOURCE_WORKFLOW;
+		axCommand[ucIndex].ucFlags = COFFEE2_COMMAND_FLAG_SAFETY_STOP;
 		axCommand[ucIndex].ulOrderId =
 			g_xCoffee2WorkflowStatus.usCurrentOrderId;
 		axCommand[ucIndex].ulOrderEpoch =
@@ -2090,6 +2311,10 @@ static int32_t prvAbortDevices(void)
 
 	lResult = 0;
 	for (ucIndex = 0U; ucIndex < 3U; ucIndex++) {
+		if ((s_usActiveDevices & (1U << axCommand[ucIndex].ucDeviceId)) == 0U) {
+			axSubmitted[ucIndex] = pdFAIL;
+			continue;
+		}
 		if ((ucIndex == 2U) && (s_ucManualOverride != 0U)) {
 			axSubmitted[ucIndex] = pdPASS;
 			continue;
@@ -2117,20 +2342,37 @@ static int32_t prvAbortDevices(void)
 			axCommand[ucIndex].ulOrderEpoch,
 			axCommand[ucIndex].ulCommandId,
 			pdMS_TO_TICKS(COFFEE2_WORKFLOW_SAFE_STOP_MS));
-		if ((xEvents & (COFFEE2_DEVICE_EVENT_COMMAND_DONE |
-			COFFEE2_DEVICE_EVENT_CANCELED)) == 0U) {
-			lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
-			(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_ERROR,
-				COFFEE2_LOG_SOURCE_WORKFLOW,
-				g_xCoffee2WorkflowStatus.usCurrentOrderId,
-				"SAFE_STOP_ACK_FAILED", lResult, "device",
-				(int32_t)axCommand[ucIndex].ucDeviceId);
+		{
+			uint8_t ucValid;
+			int32_t lStopResult;
+			lStopResult = lCoffee2DeviceGetTerminalResult(
+				(Coffee2DeviceId_e)axCommand[ucIndex].ucDeviceId,
+				axCommand[ucIndex].ulOrderEpoch,
+				axCommand[ucIndex].ulCommandId, &ucValid);
+			if (((xEvents & COFFEE2_DEVICE_EVENT_TERMINAL) == 0U) ||
+				(ucValid == 0U) || (lStopResult != 0)) {
+				lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
+				(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_ERROR,
+					COFFEE2_LOG_SOURCE_WORKFLOW,
+					g_xCoffee2WorkflowStatus.usCurrentOrderId,
+					"SAFE_STOP_ACK_FAILED", lResult, "device",
+					(int32_t)axCommand[ucIndex].ucDeviceId);
+			}
 		}
 	}
 	if (prvSetProductOutputsOff() != 0) {
 		lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
 	}
-	(void)xCoffee2LogWriteOrder(COFFEE2_LOG_LEVEL_INFO,
+	if ((s_usActiveDevices & (1U << COFFEE2_DEVICE_SYRUP_MACHINE)) != 0U) {
+		/* No verified syrup STOP command exists in this device protocol. */
+		lResult = COFFEE2_WORKFLOW_ERROR_SAFE_STOP;
+		(void)xCoffee2LogPrintfOrder(COFFEE2_LOG_LEVEL_ERROR,
+			COFFEE2_LOG_SOURCE_WORKFLOW,
+			g_xCoffee2WorkflowStatus.usCurrentOrderId,
+			"Syrup action unresolved: STOP unsupported; inspect before reset");
+	}
+	(void)xCoffee2LogWriteOrder((lResult == 0) ? COFFEE2_LOG_LEVEL_INFO :
+		COFFEE2_LOG_LEVEL_ERROR,
 		COFFEE2_LOG_SOURCE_WORKFLOW,
 		g_xCoffee2WorkflowStatus.usCurrentOrderId,
 		(lResult == 0) ? "SAFE_STOP_CONFIRMED" :
@@ -2156,6 +2398,7 @@ static void prvServiceIoRefresh(void)
 	TickType_t xNow;
 
 	xNow = xTaskGetTickCount();
+	prvServicePickup();
 	if ((int32_t)(xNow - xNextRefreshTick) < 0) {
 		return;
 	}
@@ -2225,6 +2468,9 @@ static void prvPublish(Coffee2WorkflowState_e xState,
 	default:
 		usProductionStatus = COFFEE2_PRODUCTION_IDLE;
 		break;
+	}
+	if (s_ucMaintenanceActive != 0U) {
+		return;
 	}
 	vCoffee2ServerPublishWorkflow(
 		g_xCoffee2WorkflowStatus.usCurrentOrderId,
