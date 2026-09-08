@@ -1,0 +1,34 @@
+# 06_ProtocolStack_ModbusPort与nanoMODBUS
+
+审查日期：2026-09-08。
+
+本册按源码讲解：先读头文件中的宏、枚举和结构体，再读初始化、执行、解析和错误返回。公共层由任意Target按需链接，源码存在、进入构建、运行调用是三种不同状态。关键调用链必须回到真实文件和函数。
+
+## 源码范围
+`xModbusPortClientInit/ServerInit`初始化；`prvBegin`开始事务，`prvRead/prvWrite`适配Transport，`prvFinish`映射结果；公开API覆盖线圈、离散输入和寄存器。
+
+## 读者练习
+对照对应.c/.h逐个定位公开函数的直接调用者、被调用者、失败返回和状态写入点；若当前构建或调用无法由源码确认，标记UNKNOWN。
+
+
+## 源码证据与逐步阅读
+
+### 类型与函数阅读
+
+先核对头文件中的枚举、结构体和宏：记录数值、字段所有者、写入者、读取者及生命周期。典型函数体分为参数校验、请求/PDU准备、调用Transport或ModbusPort、响应长度与异常码校验、状态镜像提交五段。
+
+### 调用链
+
+Target manager或Workflow -> 私有动作映射 -> 本公共模块 -> ModbusPort或Transport -> UART/TCP -> 响应解析 -> 状态镜像 -> Server/日志。命令接受不等于业务完成。
+
+### 失败与并发
+
+区分设备超时、链路错误、协议异常和业务完成超时；失败保留旧镜像并记录设备、地址、阶段和原始返回码。上下文由单一任务拥有，共享镜像需明确边界，DMA缓冲不得位于CCM。
+
+### 双工具链
+
+Keil以MDK-ARM/STM32F407_Base.uvprojx的Group和Include in Target Build为准；GCC以CMake源清单和Target宏为准。源码存在、编译纳入、运行调用分别记录，无法由当前源码确认的内容标记UNKNOWN。
+
+### 实操方法
+
+从公开函数反向查找调用者，再进入直接被调用函数；为每个失败分支记录返回码来源、日志位置和恢复动作。

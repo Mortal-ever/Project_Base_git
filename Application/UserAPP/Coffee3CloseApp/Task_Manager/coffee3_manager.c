@@ -114,7 +114,7 @@ static void prvUpdateNetworkIndicators(uint8_t ucNetworkReady);
 /*-----------------------------------------------------------*/
 AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 {
-
+	// 早期启动日志消息，直接通过 USART1 输出，避免依赖日志模块。
 	static const uint8_t aucBootMessage[] =
 		"[0000INFO][BOOT:System] POWER_ON result=0\r\n";
 	static const uint8_t aucVersionMessage[] =
@@ -141,6 +141,7 @@ AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 		"TASK_CREATE:C3Bus2", "TASK_CREATE:C3Bus3",
 		"TASK_CREATE:C3Bus4", "TASK_CREATE:C3Bus5"
 	};
+	// 任务创建结果和状态变量。
 	const Coffee3RtuBusConfig_t *pxBusConfig;
 	Coffee3LogResult_e xLogResult;
 	HAL_StatusTypeDef xLogSerialResult;
@@ -148,9 +149,12 @@ AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 	BaseType_t xLogTaskResult;
 	uint8_t ucBusIndex;
 
+	// 检查是否已经创建过任务管理器。
 	if (s_xStatus.ucInfrastructureCreated != 0U) {
 		return APP_TASK_MANAGER_RESULT_ALREADY_CREATED;
 	}
+	
+	// 清零状态结构体，捕获复位原因，初始化传输和日志。
 	memset(&s_xStatus, 0, sizeof(s_xStatus));
 	s_xStatus.ulResetCause = prvCaptureResetCause();
 	vTransportManagerInit();
