@@ -15,6 +15,7 @@
 #include "task.h"
 
 #define COFFEE_MACHINE_M50_POLL_MS 500U
+#define COFFEE_MACHINE_M50_TRANSACTION_MS 1000U
 
 const CoffeeMachineM50Config_t g_xCoffeeMachineM50Config = {
     0x1000U, 16U, 0x2000U, 0x200CU, 0x200DU, 0x200EU, 0x00FFU
@@ -42,6 +43,7 @@ static ModbusPortResult_e prvWaitForIdle(
     ModbusPortResult_e xResult;
     TickType_t xStart;
     uint8_t ucObservedWorking;
+    uint32_t ulTransactionMs;
 
     xStart = xTaskGetTickCount();
     ucObservedWorking = 0U;
@@ -50,7 +52,16 @@ static ModbusPortResult_e prvWaitForIdle(
             (pxCancelCheck(pvCancelContext) != 0U)) {
             return MODBUS_PORT_RESULT_CANCELED;
         }
-        xResult = prvRefresh(pxConfig, pxPort, ucUnitId, ulTimeoutMs, pxImage);
+        if ((xTaskGetTickCount() - xStart) >= pdMS_TO_TICKS(ulTimeoutMs)) {
+            return MODBUS_PORT_RESULT_TIMEOUT;
+        }
+        ulTransactionMs = ulTimeoutMs -
+            (uint32_t)(xTaskGetTickCount() - xStart) * portTICK_PERIOD_MS;
+        if (ulTransactionMs > COFFEE_MACHINE_M50_TRANSACTION_MS) {
+            ulTransactionMs = COFFEE_MACHINE_M50_TRANSACTION_MS;
+        }
+        xResult = prvRefresh(pxConfig, pxPort, ucUnitId,
+            ulTransactionMs, pxImage);
         if (xResult != MODBUS_PORT_RESULT_OK) {
             return xResult;
         }
@@ -73,18 +84,25 @@ ModbusPortResult_e xCoffeeMachineM50Execute(
     DeviceCancelCheck_t pxCancelCheck, const void *pvCancelContext)
 {
     ModbusPortResult_e xResult;
+    uint32_t ulTransactionMs;
 
     if ((pxConfig == NULL) || (pxPort == NULL) || (pxImage == NULL) ||
         (ulTimeoutMs == 0U) || (pxConfig->usStatusCount == 0U) ||
         (pxConfig->usStatusCount > COFFEE_MACHINE_M50_STATUS_CAPACITY)) {
         return MODBUS_PORT_RESULT_INVALID_ARG;
     }
+    if ((xAction != COFFEE_MACHINE_M50_ACTION_CANCEL) &&
+        (pxCancelCheck != NULL) && (pxCancelCheck(pvCancelContext) != 0U)) {
+        return MODBUS_PORT_RESULT_CANCELED;
+    }
+    ulTransactionMs = (ulTimeoutMs > COFFEE_MACHINE_M50_TRANSACTION_MS) ?
+        COFFEE_MACHINE_M50_TRANSACTION_MS : ulTimeoutMs;
     if (xAction == COFFEE_MACHINE_M50_ACTION_REFRESH) {
         return prvRefresh(pxConfig, pxPort, ucUnitId, ulTimeoutMs, pxImage);
     }
     if (xAction == COFFEE_MACHINE_M50_ACTION_MAKE) {
         xResult = xModbusPortWriteRegister(pxPort, ucUnitId,
-            pxConfig->usMakeRegister, usParameter, ulTimeoutMs);
+            pxConfig->usMakeRegister, usParameter, ulTransactionMs);
         if (xResult != MODBUS_PORT_RESULT_OK) {
             return xResult;
         }

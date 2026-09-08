@@ -147,8 +147,8 @@ set(APP_PUBLIC_TARGETS
     device_io
 )
 
-if(PRODUCT_NAME STREQUAL "Coffee2")
-    set(COFFEE2_APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/UserAPP/Coffee2App)
+if(PRODUCT_NAME STREQUAL "Coffee2Open")
+    set(COFFEE2_APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/UserAPP/Coffee2OpenApp)
 
     add_library(coffee2_app OBJECT
         ${COFFEE2_APP_ROOT}/Comm_Log/coffee2_log.c
@@ -187,6 +187,42 @@ if(PRODUCT_NAME STREQUAL "Coffee2")
         coffee2_app
         PARENT_SCOPE
     )
+elseif(PRODUCT_NAME STREQUAL "Coffee3Close")
+    set(COFFEE3_APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/UserAPP/Coffee3CloseApp)
+
+    add_library(coffee3_app OBJECT
+        ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_log.c
+        ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_crash_log_port.c
+        ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_retarget.c
+        ${COFFEE3_APP_ROOT}/Device/coffee3_device.c
+        ${COFFEE3_APP_ROOT}/Device/coffee3_device_image.c
+        ${COFFEE3_APP_ROOT}/IO_State/coffee3_io.c
+        ${COFFEE3_APP_ROOT}/Modbus_Rtu_Bus/coffee3_rtu_bus.c
+        ${COFFEE3_APP_ROOT}/Modbus_Tcp_Server/coffee3_server.c
+        ${COFFEE3_APP_ROOT}/Ota/coffee3_ota.c
+        ${COFFEE3_APP_ROOT}/Robot_Tcp/coffee3_robot_tcp.c
+        ${COFFEE3_APP_ROOT}/Task_Manager/coffee3_manager.c
+        ${COFFEE3_APP_ROOT}/WorkFlow/coffee3_workflow.c
+    )
+    target_compile_definitions(coffee3_app PRIVATE USE_COFFEE3=1)
+    target_include_directories(coffee3_app PRIVATE
+        ${COFFEE3_APP_ROOT}/Config ${COFFEE3_APP_ROOT}/Comm_Log
+        ${COFFEE3_APP_ROOT}/Task_Manager ${COFFEE3_APP_ROOT}/Device
+        ${COFFEE3_APP_ROOT}/IO_State ${COFFEE3_APP_ROOT}/Modbus_Rtu_Bus
+        ${COFFEE3_APP_ROOT}/Modbus_Tcp_Server ${COFFEE3_APP_ROOT}/Ota
+        ${COFFEE3_APP_ROOT}/Robot_Tcp ${COFFEE3_APP_ROOT}/WorkFlow
+    )
+    target_link_libraries(coffee3_app PUBLIC
+        product_interfaces app_diagnostics app_transport app_modbus_port
+        app_log app_lwip_alert app_ota app_tcp_client_session device_dobot
+        device_coffee_m50 device_cup_lid device_syrup device_ice device_scale
+        device_power_meter device_io
+    )
+    set(PRODUCT_LINK_TARGETS
+        app_diagnostics app_transport app_modbus_port app_log app_lwip_alert
+        app_ota app_tcp_client_session device_dobot device_coffee_m50
+        device_cup_lid device_syrup device_ice device_scale device_power_meter
+        device_io coffee3_app PARENT_SCOPE)
 else()
     message(FATAL_ERROR "Unsupported PRODUCT_NAME=${PRODUCT_NAME}")
 endif()

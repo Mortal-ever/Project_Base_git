@@ -136,7 +136,7 @@
 /*-----------------------------------------------------------------------------*/
 /* USER CODE BEGIN 1 */
 
-#if defined(USE_COFFEE2)
+#if defined(USE_COFFEE2) || defined(USE_COFFEE3)
 #undef LWIP_STATS
 #define LWIP_STATS 1
 #undef LWIP_STATS_DISPLAY

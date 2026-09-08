@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("Coffee2", "MilkTea")]
-    [string]$Product = "Coffee2",
+    [ValidateSet("Coffee2Open", "Coffee3Close")]
+    [string]$Product = "Coffee2Open",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
     [switch]$Fresh

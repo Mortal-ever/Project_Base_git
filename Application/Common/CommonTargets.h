@@ -22,9 +22,15 @@
 #ifndef USE_COFFEE2
 #define USE_COFFEE2 0
 #endif
+#ifndef USE_COFFEE3
+#define USE_COFFEE3 0
+#endif
 
 #if USE_COFFEE2
 #include "coffee2_manager.h"
+#endif
+#if USE_COFFEE3
+#include "coffee3_manager.h"
 #endif
 
 #endif /* COMMON_TARGETS_H */

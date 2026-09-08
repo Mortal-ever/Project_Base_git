@@ -12,30 +12,54 @@
             }
         },
         {
-            "name": "Coffee2-Debug",
+            "name": "Coffee2Open-Debug",
             "inherits": "base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "PRODUCT_NAME": "Coffee2"
+                "PRODUCT_NAME": "Coffee2Open"
             }
         },
         {
-            "name": "Coffee2-Release",
+            "name": "Coffee2Open-Release",
             "inherits": "base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "PRODUCT_NAME": "Coffee2"
+                "PRODUCT_NAME": "Coffee2Open"
+            }
+        },
+        {
+            "name": "Coffee3Close-Debug",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "PRODUCT_NAME": "Coffee3Close"
+            }
+        },
+        {
+            "name": "Coffee3Close-Release",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "PRODUCT_NAME": "Coffee3Close"
             }
         }
     ],
     "buildPresets": [
         {
-            "name": "Coffee2-Debug",
-            "configurePreset": "Coffee2-Debug"
+            "name": "Coffee2Open-Debug",
+            "configurePreset": "Coffee2Open-Debug"
         },
         {
-            "name": "Coffee2-Release",
-            "configurePreset": "Coffee2-Release"
+            "name": "Coffee2Open-Release",
+            "configurePreset": "Coffee2Open-Release"
+        },
+        {
+            "name": "Coffee3Close-Debug",
+            "configurePreset": "Coffee3Close-Debug"
+        },
+        {
+            "name": "Coffee3Close-Release",
+            "configurePreset": "Coffee3Close-Release"
         }
     ]
 }

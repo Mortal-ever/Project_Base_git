@@ -9,12 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
-set(PRODUCT_NAME "Coffee2" CACHE STRING "Product target")
-set_property(CACHE PRODUCT_NAME PROPERTY STRINGS Coffee2)
+set(PRODUCT_NAME "Coffee2Open" CACHE STRING "Product target")
+set_property(CACHE PRODUCT_NAME PROPERTY STRINGS Coffee2Open Coffee3Close)
 
-if(PRODUCT_NAME STREQUAL "Coffee2")
-    set(FIRMWARE_TARGET Coffee2Target)
+if(PRODUCT_NAME STREQUAL "Coffee2Open")
+    set(FIRMWARE_TARGET Coffee2OpenTarget)
     set(PRODUCT_DEFINE USE_COFFEE2=1)
+elseif(PRODUCT_NAME STREQUAL "Coffee3Close")
+    set(FIRMWARE_TARGET Coffee3CloseTarget)
+    set(PRODUCT_DEFINE USE_COFFEE3=1)
 else()
     message(FATAL_ERROR "Unsupported PRODUCT_NAME=${PRODUCT_NAME}")
 endif()
@@ -60,7 +63,8 @@ target_include_directories(stm32cubemx INTERFACE
 # The generated sources are compiled as part of the product executable rather
 # than an object target, so keep this composition-root include private to it.
 target_include_directories(${FIRMWARE_TARGET} PRIVATE
-    "${PROJECT_BASE_ROOT}/Application/UserAPP/Coffee2App/Task_Manager"
+    "$<$<STREQUAL:${PRODUCT_NAME},Coffee2Open>:${PROJECT_BASE_ROOT}/Application/UserAPP/Coffee2OpenApp/Task_Manager>"
+    "$<$<STREQUAL:${PRODUCT_NAME},Coffee3Close>:${PROJECT_BASE_ROOT}/Application/UserAPP/Coffee3CloseApp/Task_Manager>"
 )
 add_subdirectory(
     "${PROJECT_BASE_ROOT}/Application/New_Party/nanoMODBUS"
@@ -72,7 +76,7 @@ add_subdirectory(
 )
 
 target_compile_definitions(${FIRMWARE_TARGET} PRIVATE ${PRODUCT_DEFINE})
-if(PRODUCT_NAME STREQUAL "Coffee2")
+if(PRODUCT_NAME STREQUAL "Coffee2Open" OR PRODUCT_NAME STREQUAL "Coffee3Close")
     target_compile_definitions(${FIRMWARE_TARGET} PRIVATE
         USER_VECT_TAB_ADDRESS
         VECT_TAB_OFFSET=0x0000C000U
@@ -102,7 +106,7 @@ target_link_options(${FIRMWARE_TARGET} PRIVATE
     "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/${FIRMWARE_TARGET}.map"
 )
 
-if(PRODUCT_NAME STREQUAL "Coffee2")
+if(PRODUCT_NAME STREQUAL "Coffee2Open" OR PRODUCT_NAME STREQUAL "Coffee3Close")
     get_filename_component(FIRMWARE_LINKER_SCRIPT
         "${CMAKE_CURRENT_SOURCE_DIR}/linker/STM32F407XX_COFFEE2_OTA_FLASH.ld" ABSOLUTE)
 else()

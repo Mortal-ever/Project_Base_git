@@ -108,8 +108,8 @@ class Coffee2Contracts(unittest.TestCase):
     def test_fc16_debug_prevalidation_and_ownership(self):
         debug = body(self.server, "prvCommitIoDebugWriteRange")
         self.assertLess(debug.index("0xFF00U"), debug.index("prvCommitIoDebugWrite("))
-        self.assertIn("xCoffee2WorkflowAcquireManual", debug)
-        self.assertIn("ucCoffee2OtaHttpIsActive", debug)
+        self.assertNotIn("xCoffee2WorkflowAcquireManual", debug)
+        self.assertNotIn("ucCoffee2OtaHttpIsActive", debug)
         self.assertIn("usIndex = usQuantity", debug)
 
     def test_io_protocol_error_does_not_publish_unread_zero_image(self):
@@ -168,10 +168,28 @@ class Coffee2Contracts(unittest.TestCase):
     def test_keil_paths_and_only_coffee2_target(self):
         project = ROOT / "MDK-ARM/STM32F407_Base.uvprojx"
         tree = ET.parse(project)
-        self.assertEqual([t.text for t in tree.findall("./Targets/Target/TargetName")], ["Coffee2"])
+        targets = [t.text for t in tree.findall("./Targets/Target/TargetName")]
+        self.assertIn("Coffee2Open", targets)
+        self.assertIn("Coffee3Close", targets)
         for entry in tree.findall(".//FilePath"):
             path = project.parent / entry.text.replace("\\", "/")
             self.assertTrue(path.is_file(), str(path))
+
+    def test_coffee3_target_uses_m50_and_private_app(self):
+        project = read(ROOT / "MDK-ARM/STM32F407_Base.uvprojx")
+        self.assertIn("Coffee3Close", project)
+        self.assertIn("coffee_machine_m50.c", project)
+        self.assertIn("coffee3_workflow.c", project)
+        self.assertIn("Coffee3Close_CCM.sct", project)
+        self.assertIn("<FileName>coffee3_manager.c</FileName>",
+                      project[project.index("<TargetName>Coffee3Close") :])
+
+    def test_coffee3_workflow_owns_outlet_and_m50_completion(self):
+        workflow = read(ROOT / "Application/UserAPP/Coffee3CloseApp/WorkFlow/coffee3_workflow.c")
+        self.assertIn("M50 tank fill stopped", workflow)
+        self.assertIn("Outlet X3 empty for 30 s", workflow)
+        self.assertIn("xCoffee3WorkflowAcquireOta", workflow)
+        self.assertIn("COFFEE3_COFFEE_ACTION_TIMEOUT_MS", workflow)
 
 
 if __name__ == "__main__":

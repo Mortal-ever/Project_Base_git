@@ -27,7 +27,7 @@ set(CMAKE_ASM_FLAGS_INIT
 set(CMAKE_CXX_FLAGS_INIT
     "${MCU_FLAGS} ${COMMON_SECTION_FLAGS} -Wall -Wextra -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
-if(PRODUCT_NAME STREQUAL "Coffee2")
+if(PRODUCT_NAME STREQUAL "Coffee2Open" OR PRODUCT_NAME STREQUAL "Coffee3Close")
     set(CMAKE_C_FLAGS_DEBUG_INIT "-Og -g3")
     set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Og -g3")
 else()
