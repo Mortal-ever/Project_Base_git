@@ -37,22 +37,22 @@ typedef enum {
 
 /** @brief Store observable Coffee2 startup and network readiness. */
 typedef struct {
-	AppTaskManagerResult_e xStartResult;
-	uint32_t ulResetCause;
-	uint32_t ulTaskCreatedMask;
-	uint32_t ulTaskFailedMask;
-	uint32_t ulFreeHeapBeforeTasks;
-	uint32_t ulFreeHeapAfterTasks;
-	uint8_t ucInfrastructureCreated;
-	uint8_t ucTasksCreated;
+	AppTaskManagerResult_e xStartResult; /*!< Software startup result, not physical initialization outcome. */
+	uint32_t ulResetCause; /*!< Captured RCC reset-cause mask before hardware flags are cleared. */
+	uint32_t ulTaskCreatedMask; /*!< Task bits successfully created during startup. */
+	uint32_t ulTaskFailedMask; /*!< Task bits whose resource allocation failed. */
+	uint32_t ulFreeHeapBeforeTasks; /*!< FreeRTOS free heap bytes before task allocation. */
+	uint32_t ulFreeHeapAfterTasks; /*!< FreeRTOS free heap bytes after task allocation. */
+	uint8_t ucInfrastructureCreated; /*!< Prevents repeating completed module construction. */
+	uint8_t ucTasksCreated; /*!< Core task creation sequence completed successfully. */
 	uint8_t ucLogReady; /*!< Log Transport and C2Log task are ready. */
-	uint8_t ucDeviceReady;
-	uint8_t ucServerReady;
-	uint8_t ucRobotReady;
-	uint8_t ucRtuReady;
-	uint8_t ucWorkflowReady;
-	uint8_t ucNetworkStackReady;
-	uint8_t ucNetworkReady;
+	uint8_t ucDeviceReady; /*!< Device software events/routes initialized; no hardware proof. */
+	uint8_t ucServerReady; /*!< Server software initialized; no client required yet. */
+	uint8_t ucRobotReady; /*!< Robot software initialized; transport may still be offline. */
+	uint8_t ucRtuReady; /*!< RTU queues initialized; UART owner opens later in its task. */
+	uint8_t ucWorkflowReady; /*!< Order/service software initialized; residual check is later. */
+	uint8_t ucNetworkStackReady; /*!< Default task has returned from lwIP initialization. */
+	uint8_t ucNetworkReady; /*!< Current link, netif and IPv4 readiness, updated periodically. */
 } AppTaskManagerStatus_t;
 
 /**

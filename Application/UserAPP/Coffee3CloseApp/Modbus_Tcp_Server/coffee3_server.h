@@ -103,27 +103,27 @@ void vCoffee3ServerFinishRequest(uint8_t ucStoragePickup);
 
 /** @brief Store one accepted TCP client slot's public status. */
 typedef struct {
-	uint32_t ulRemoteIpv4;
-	uint32_t ulRequestCount;
-	uint32_t ulErrorCount;
-	uint32_t ulDisconnectCount;
-	uint32_t ulLastActivityTick;
-	int32_t lLastResult;
-	uint16_t usRemotePort;
-	uint8_t ucConnected;
+	uint32_t ulRemoteIpv4; /*!< Remote IPv4 value retained for client diagnostics. */
+	uint32_t ulRequestCount; /*!< Requests handled by this reusable client slot. */
+	uint32_t ulErrorCount; /*!< Cumulative failures; latest cause is retained separately. */
+	uint32_t ulDisconnectCount; /*!< Observed connection closures for this status object. */
+	uint32_t ulLastActivityTick; /*!< Last recorded socket activity in RTOS ticks. */
+	int32_t lLastResult; /*!< Latest native owner result; zero alone does not prove readiness. */
+	uint16_t usRemotePort; /*!< Remote peer port, distinct from the listening port. */
+	uint8_t ucConnected; /*!< TCP transport connection status, not robot control readiness. */
 } Coffee3ServerClientStatus_t;
 
 /** @brief Store listener and configured-slot runtime counters. */
 typedef struct {
-	Coffee3ServerClientStatus_t axClient[COFFEE3_SERVER_MAX_CLIENTS];
-	uint32_t ulAcceptedCount;
-	uint32_t ulRejectedCount;
-	uint32_t ulListenerErrorCount;
-	uint32_t ulOnlineTransitionCount;
-	uint16_t usListenPort;
-	uint8_t ucActiveClients;
-	uint8_t ucListening;
-	uint8_t ucOnline;
+	Coffee3ServerClientStatus_t axClient[COFFEE3_SERVER_MAX_CLIENTS]; /*!< Fixed client-slot status array sized by product configuration. */
+	uint32_t ulAcceptedCount; /*!< Cumulative accepted TCP clients. */
+	uint32_t ulRejectedCount; /*!< Connections rejected when admission/slots are unavailable. */
+	uint32_t ulListenerErrorCount; /*!< Listener failures independent of individual requests. */
+	uint32_t ulOnlineTransitionCount; /*!< Recorded listener/server online transitions. */
+	uint16_t usListenPort; /*!< Product server TCP listening port. */
+	uint8_t ucActiveClients; /*!< Number of currently occupied client slots. */
+	uint8_t ucListening; /*!< Listener socket has been established. */
+	uint8_t ucOnline; /*!< Communication availability; independent of control readiness. */
 } Coffee3ServerStatus_t;
 
 extern Coffee3ServerStatus_t g_xCoffee3ServerStatus;

@@ -22,7 +22,7 @@ extern "C" {
 
 /** @brief Store one immutable accepted order snapshot. */
 typedef struct {
-	uint16_t ausRegister[COFFEE2_ORDER_REGISTER_COUNT];
+	uint16_t ausRegister[COFFEE2_ORDER_REGISTER_COUNT]; /*!< Immutable 32-register accepted order copy owned by workflow. */
 } Coffee2Order_t;
 
 /** @brief Define high-level workflow lifecycle. */
@@ -63,30 +63,30 @@ typedef enum {
 
 /** @brief Store workflow progress for Server monitoring. */
 typedef struct {
-	uint32_t ulCompletedOrderCount;
-	uint32_t ulFailedOrderCount;
-	uint32_t ulOrderEpoch;
-	uint16_t usCurrentOrderId;
-	uint16_t usCurrentStep;
-	int32_t lLastError;
-	Coffee2WorkflowState_e xState;
-	Coffee2MachineState_e xMachineState;
-	uint8_t ucCancelRequested;
-	uint8_t ucOrderAdmissionOpen;
-	uint8_t ucHotWaterState;
-	uint8_t ucCoffeeCleanState;
-	uint8_t aucFruitState[2];
-	uint16_t ausOutputState[2];
-	uint16_t ausOutputOrderId[2];
-	uint16_t usActiveOutput;
-	uint16_t usAction;
-	uint8_t ucDeviceId;
-	uint8_t ucCommandSent;
-	uint8_t ucDeviceDone;
-	uint8_t ucPhysicalVerified;
-	uint8_t ucPositionUncertain;
-	uint8_t ucRecoveryRequired;
-	int32_t lSafetyResult;
+	uint32_t ulCompletedOrderCount; /*!< Workflow increments after a successful order path. */
+	uint32_t ulFailedOrderCount; /*!< Workflow increments on failed order processing. */
+	uint32_t ulOrderEpoch; /*!< Cancellation generation; zero denotes non-order work. */
+	uint16_t usCurrentOrderId; /*!< Current/last order projected to host status and logs. */
+	uint16_t usCurrentStep; /*!< Last published workflow step; not a device address. */
+	int32_t lLastError; /*!< Business-level failure, distinct from device terminal result. */
+	Coffee2WorkflowState_e xState; /*!< Workflow lifecycle; not the whole-machine state enum. */
+	Coffee2MachineState_e xMachineState; /*!< Host-facing whole-machine lifecycle and admission state. */
+	uint8_t ucCancelRequested; /*!< Cooperative cancellation request inspected at wait points. */
+	uint8_t ucOrderAdmissionOpen; /*!< Workflow admission permission, not network readiness. */
+	uint8_t ucHotWaterState; /*!< Host-visible state of the serviced hot-water operation. */
+	uint8_t ucCoffeeCleanState; /*!< Host-visible coffee cleaning progress. */
+	uint8_t aucFruitState[2]; /*!< Host-visible maintenance state for fruit channels A and B. */
+	uint16_t ausOutputState[2]; /*!< Retained outlet transaction states, separate from production. */
+	uint16_t ausOutputOrderId[2]; /*!< Order association retained until each outlet is released. */
+	uint16_t usActiveOutput; /*!< Selected one-based product output resource. */
+	uint16_t usAction; /*!< Product action; owner translates it to a device-native request. */
+	uint8_t ucDeviceId; /*!< Logical device id resolved through the immutable binding table. */
+	uint8_t ucCommandSent; /*!< Queue accepted the step; physical action may not have started. */
+	uint8_t ucDeviceDone; /*!< Matching owner command completed; sensor check is separate. */
+	uint8_t ucPhysicalVerified; /*!< Workflow verified the required physical postcondition. */
+	uint8_t ucPositionUncertain; /*!< Position action may have changed hardware before failure. */
+	uint8_t ucRecoveryRequired; /*!< Admission lock requiring the product recovery procedure. */
+	int32_t lSafetyResult; /*!< Safety-stop result kept separate from the original order error. */
 } Coffee2WorkflowStatus_t;
 
 extern Coffee2WorkflowStatus_t g_xCoffee2WorkflowStatus;

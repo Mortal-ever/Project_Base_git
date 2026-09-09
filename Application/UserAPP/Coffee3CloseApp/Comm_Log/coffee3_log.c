@@ -58,11 +58,14 @@ Coffee3LogResult_e xCoffee3LogInit(void)
 /*-----------------------------------------------------------*/
 Coffee3LogResult_e xCoffee3LogInitWithTransport(uint8_t ucEnableTransport)
 {
+	/* Build the source table first, then optionally bind USART1. The common
+	 * log core remains usable for early diagnostics when transport is absent. */
 	AppLogConfig_t xConfig;
 	TransportUartConfig_t xUartConfig;
 	AppLogResult_e xLogResult;
 	TransportResult_e xTransportResult;
 
+	/* Initialization is intentionally idempotent at the adapter boundary. */
 	if (g_xAppLogStatus.ucInitialized != 0U) {
 		return COFFEE3_LOG_RESULT_ALREADY_INITIALIZED;
 	}
@@ -86,6 +89,8 @@ Coffee3LogResult_e xCoffee3LogInitWithTransport(uint8_t ucEnableTransport)
 			}
 		}
 	}
+	/* The ring can be valid even when UART setup failed; preserve that status
+	 * so startup can emit a raw failure and continue module diagnosis. */
 	xLogResult = xAppLogInit(&xConfig);
 	if ((xLogResult == APP_LOG_RESULT_TRANSPORT) &&
 		(xConfig.pxTransportChannel == NULL)) {
@@ -147,6 +152,8 @@ Coffee3LogResult_e xCoffee3LogWriteTextOrder(Coffee3LogLevel_e xLevel,
 Coffee3LogResult_e xCoffee3LogPrintfOrder(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, uint16_t usOrderId, const char *pcFormat, ...)
 {
+	/* Format into a bounded stack buffer before copying text into the common
+	 * record. Truncation is preferred to unbounded allocation in a task. */
 	char acText[72];
 	va_list xArguments;
 	int lLength;

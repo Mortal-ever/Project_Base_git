@@ -10,15 +10,16 @@ Coffee3业务需要制作一杯指定配方：Workflow决定何时做；Device�
 
 ```mermaid
 flowchart TD
-  A[平台启动 freertos.c] --> B[CommonTargets 选择产品manager]
+  A[平台启动 freertos.c] --> B[CommonTargets <br>选择产品manager]
   B --> C[Coffee2Open 私有应用]
   B --> D[Coffee3Close 私有应用]
   C --> E[公共 DeviceLibrary]
   D --> E
   E --> F[ModbusPort和nanoMODBUS]
-  E --> G[Transport]
+  E --> H[私有协议 <br>咖博士F200]
+  H --> G
   F --> G
-  G --> H[HAL UART / lwIP TCP]
+  G[Transport] --> K[HAL UART / lwIP TCP]
 ```
 
 这是可用依赖关系图；同一次固件只选择一个Target，不会同时启动C和D。F200走设备库到Transport的边，M50走ModbusPort边。
@@ -45,7 +46,7 @@ DeviceProtocol没有作为独立层恢复。自有协议不等于私有业务：
 
 ## 一个设备共享多个逻辑角色
 
-Cup和Lid在Bus3/unit1，是同一物理控制器的不同角色。Binding.ucRole传入公共ShengShu接口后选择寄存器区域。若把每个逻辑设备编号都当unit，就会给错误地址发帧。
+Cup和Lid在Bus3/unit1，是同一物理控制器的不同角色。Binding.ucRole传入公共`落杯落盖机:ShengShu`接口后选择寄存器区域。若把每个逻辑设备编号都当unit，就会给错误地址发帧。
 
 设备ID10明确是16路输出模块；Binding把它送Bus5/unit2。上位机看外部DO第1组，但私有数组名为MB2YPin。名称相似不表示这三个空间数字必须一致。
 

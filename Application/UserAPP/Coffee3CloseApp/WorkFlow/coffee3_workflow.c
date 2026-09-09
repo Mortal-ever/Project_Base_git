@@ -337,6 +337,8 @@ static void prvStartDoor(uint8_t ucDirection)
 /* Workflow alone drives both directions; never energize them together. */
 static void prvServicePickup(void)
 {
+	/* Keep outlet mechanics separate from production: the sensor edge, the
+	 * 30-second empty hold and the host pickup acknowledgement are distinct. */
 	Coffee3IoState_t xIo;
 	TickType_t xNow;
 	uint8_t ucCup;
@@ -1007,6 +1009,8 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	Coffee3Action_e xAction, uint16_t usParameter0,
 	uint16_t usParameter1, uint32_t ulTimeoutMs)
 {
+	/* Own one complete submit/wait/result lifecycle. A successful device
+	 * transaction may still require a sensor postcondition in the caller. */
 	Coffee3Command_t xCommand;
 	EventBits_t xEvents;
 	TickType_t xStartTick;
@@ -1019,6 +1023,7 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	int32_t lCommandResult;
 	const Coffee3DeviceBinding_t *pxBinding;
 
+	/* FDxx initialization steps are diagnostics; lower steps are order steps. */
 	ucOrderStep = (usStep < 0xF000U) ? 1U : 0U;
 	pxBinding = pxCoffee3DeviceGetBinding(xDeviceId);
 	ucInitializationStep = ((usStep >= 0xFD00U) &&
@@ -1230,6 +1235,8 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 /*-----------------------------------------------------------*/
 static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 {
+	/* Reserve storage/outlet resources before robot motion, then execute the
+	 * ordered device sequence and verify each physical postcondition. */
 	int32_t lResult;
 	int32_t lValidationError;
 	uint16_t usIceAmount;
@@ -1765,6 +1772,8 @@ static int32_t prvSetProductOutputsOff(void)
 /*-----------------------------------------------------------*/
 static int32_t prvRunInitialization(void)
 {
+	/* Residual-cup failure is a latched startup safety state; recovery is an
+	 * operator action followed by a complete reset. */
 	int32_t lResult;
 	uint8_t ucSource;
 	static const Coffee3Action_e axSources[3] = {

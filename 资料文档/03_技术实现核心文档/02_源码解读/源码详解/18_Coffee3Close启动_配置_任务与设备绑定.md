@@ -961,7 +961,7 @@ SHA-256：`21C1C91A59A66A5C72BF66658A0F7355513C793D07E1BF9760006136EBDBE0F8`。�
 | --- | --- | --- |
 | 115 | `xAppTaskManagerCreateTasks` | lCoffee3LogEarlyWrite, memset, prvCaptureResetCause, prvCreateTaskLogged, prvGetBusLogSource, prvWriteRawStartupFailure, pxCoffee3RtuBusGetConfig, vCoffee3IoInitialize, vCoffee3LogSetTaskReady, vTransportManagerInit, xCoffee3DeviceInitialize, xCoffee3LogInitWithTransport, xCoffee3LogSerialApplyDefault, xCoffee3LogWrite, xCoffee3LogWriteField, xCoffee3RobotTcpInitialize, xCoffee3RtuBusInitialize, xCoffee3SerialApplyDefaults, xCoffee3ServerInitialize, xCoffee3WorkflowInitialize, xEventGroupCreateStatic, xPortGetFreeHeapSize |
 | 353 | `vAppTaskManagerRunDefaultTask` | pdMS_TO_TICKS, prvApplyNetworkConfiguration, prvIsNetworkReady, prvPublishNetworkReady, prvUpdateNetworkIndicators, taskENTER_CRITICAL, taskEXIT_CRITICAL, vTaskDelay, xCoffee3LogWrite, xCoffee3LogWriteField, xEventGroupSetBits |
-| 382 | `vAppTaskManagerWaitNetworkStackReady` | xEventGroupWaitBits |
+| 382 | `vAppTaskManagerWaitNetworkStackReady` | xxxxxxxxxx typedef struct {    uint8_t aucBaseInputs[16];    uint8_t aucControlCoils[COFFEE2_ROBOT_CONTROL_COIL_COUNT];} Coffee2RobotData_t;c |
 | 393 | `ucAppTaskManagerIsNetworkReady` | xEventGroupGetBits |
 | 405 | `vAppTaskManagerGetStatus` | taskENTER_CRITICAL, taskEXIT_CRITICAL |
 | 416 | `prvPublishNetworkReady` | taskENTER_CRITICAL, taskEXIT_CRITICAL, xCoffee3LogWrite, xEventGroupClearBits, xEventGroupSetBits |

@@ -118,17 +118,17 @@ typedef enum {
 
 /** @brief Store one Coffee2 command copied through static owner queues. */
 typedef struct {
-	uint32_t ulCommandId;
-	uint32_t ulOrderId;
-	uint32_t ulOrderEpoch;
-	uint32_t ulTimeoutMs;
-	uint16_t usStepId;
-	uint16_t usAction;
-	uint16_t ausParameter[4];
-	uint8_t ucDeviceId;
-	uint8_t ucSource;
-	uint8_t ucRetryLimit;
-	uint8_t ucFlags;
+	uint32_t ulCommandId; /*!< Submission sequence; pair with epoch to identify completion. */
+	uint32_t ulOrderId; /*!< Log correlation id; not a queue priority or slave address. */
+	uint32_t ulOrderEpoch; /*!< Cancellation generation; zero denotes non-order work. */
+	uint32_t ulTimeoutMs; /*!< Owner transaction budget in milliseconds, not queue wait ticks. */
+	uint16_t usStepId; /*!< Workflow diagnostic step, preserved through the owner queue. */
+	uint16_t usAction; /*!< Product action; owner translates it to a device-native request. */
+	uint16_t ausParameter[4]; /*!< Four inline action parameters, copied with the queue item. */
+	uint8_t ucDeviceId; /*!< Logical device id resolved through the immutable binding table. */
+	uint8_t ucSource; /*!< Producer category used by admission, cancellation and logging. */
+	uint8_t ucRetryLimit; /*!< Additional owner attempts; non-idempotent coffee writes override it. */
+	uint8_t ucFlags; /*!< Safety-stop, manual-reservation and debug policy bits. */
 } Coffee2Command_t;
 
 typedef char Coffee2CommandSizeMustBe32[
@@ -136,44 +136,44 @@ typedef char Coffee2CommandSizeMustBe32[
 
 /** @brief Bind one logical device to one task route and native protocol. */
 typedef struct {
-	Coffee2DeviceId_e xDeviceId;
-	uint8_t ucRouteId;
-	uint8_t ucUnitId;
-	uint16_t usMinimumIntervalMs;
-	uint8_t ucCategory;
-	uint8_t ucRole;
-	uint8_t ucDriverId;
-	uint8_t ucProtocolId;
-	const char *pcName;
+	Coffee2DeviceId_e xDeviceId; /*!< Product device key; differs from the Modbus slave unit. */
+	uint8_t ucRouteId; /*!< Queue owner: Robot route 0 or UART bus routes 2 through 5. */
+	uint8_t ucUnitId; /*!< Protocol slave address on the selected physical route. */
+	uint16_t usMinimumIntervalMs; /*!< Minimum gap between owner transactions, in milliseconds. */
+	uint8_t ucCategory; /*!< Public device category, independent of installed driver model. */
+	uint8_t ucRole; /*!< Device role; cup and lid may share a controller with different roles. */
+	uint8_t ucDriverId; /*!< Selected public driver model for this product binding. */
+	uint8_t ucProtocolId; /*!< Wire protocol selected for the bound device or bus. */
+	const char *pcName; /*!< Borrowed static diagnostic name; storage outlives owner tasks. */
 } Coffee2DeviceBinding_t;
 
 /** @brief Store globally observable status for one logical device. */
 typedef struct {
-	uint32_t ulLastCommandId;
-	uint32_t ulLastOrderEpoch;
-	uint32_t ulLastSuccessTick;
-	uint32_t ulCommandCount;
-	uint32_t ulErrorCount;
-	int32_t lLastResult;
-	uint16_t usLastAction;
-	uint8_t ucOnline;
-	uint8_t ucBusy;
-	uint8_t ucReady;
-	uint8_t ucRecovering;
-	uint8_t ucRobotPhase;
-	uint8_t ucRobotAccepted;
-	uint8_t ucTerminalValid;
-	uint8_t ucPreviousTerminalValid;
-	uint32_t ulTerminalCommandId;
-	uint32_t ulTerminalOrderEpoch;
-	int32_t lTerminalResult;
-	uint16_t usTerminalAction;
-	uint8_t ucTerminalTimedOut;
-	uint32_t ulPreviousTerminalCommandId;
-	uint32_t ulPreviousTerminalOrderEpoch;
-	int32_t lPreviousTerminalResult;
-	uint16_t usPreviousTerminalAction;
-	uint8_t ucPreviousTerminalTimedOut;
+	uint32_t ulLastCommandId; /*!< Most recently started command, not necessarily a terminal result. */
+	uint32_t ulLastOrderEpoch; /*!< Generation of the most recently started command. */
+	uint32_t ulLastSuccessTick; /*!< RTOS tick of last success; not a millisecond counter. */
+	uint32_t ulCommandCount; /*!< Cumulative commands observed by this owner/status object. */
+	uint32_t ulErrorCount; /*!< Cumulative failures; latest cause is retained separately. */
+	int32_t lLastResult; /*!< Latest native owner result; zero alone does not prove readiness. */
+	uint16_t usLastAction; /*!< Action associated with the most recently started command. */
+	uint8_t ucOnline; /*!< Communication availability; independent of control readiness. */
+	uint8_t ucBusy; /*!< Owner has published a started command without its terminal result. */
+	uint8_t ucReady; /*!< Module-specific readiness; consult the producer before issuing work. */
+	uint8_t ucRecovering; /*!< Current command is retained while its link is being recovered. */
+	uint8_t ucRobotPhase; /*!< Robot transaction phase used by workflow timeout decisions. */
+	uint8_t ucRobotAccepted; /*!< Acceptance edge for the current robot command. */
+	uint8_t ucTerminalValid; /*!< Latest terminal fields contain a published result. */
+	uint8_t ucPreviousTerminalValid; /*!< Previous terminal fields contain a published result. */
+	uint32_t ulTerminalCommandId; /*!< Sequence key of the latest retained terminal result. */
+	uint32_t ulTerminalOrderEpoch; /*!< Generation key of the latest retained terminal result. */
+	int32_t lTerminalResult; /*!< Uncollapsed owner result for the latest completed command. */
+	uint16_t usTerminalAction; /*!< Completed action; successful CANCEL maps to canceled event. */
+	uint8_t ucTerminalTimedOut; /*!< Explicit timeout classification of the latest result. */
+	uint32_t ulPreviousTerminalCommandId; /*!< Sequence key of the preceding retained completion. */
+	uint32_t ulPreviousTerminalOrderEpoch; /*!< Generation key of the preceding completion. */
+	int32_t lPreviousTerminalResult; /*!< Original owner result from the preceding completion. */
+	uint16_t usPreviousTerminalAction; /*!< Action associated with the preceding completion. */
+	uint8_t ucPreviousTerminalTimedOut; /*!< Timeout classification of the preceding completion. */
 } Coffee2DeviceStatus_t;
 
 /** @brief Public status array indexed by Coffee2DeviceId_e. */

@@ -27,22 +27,22 @@ extern "C" {
 
 /** @brief Store Robot TCP lifecycle and transaction counters. */
 typedef struct {
-	uint32_t ulConnectAttemptCount;
-	uint32_t ulConnectSuccessCount;
-	uint32_t ulDisconnectCount;
-	uint32_t ulCommandCount;
-	uint32_t ulErrorCount;
-	uint32_t ulConsecutiveFailures;
-	uint32_t ulNextRetryDelayMs;
-	int32_t lLastResult;
-	uint8_t ucConnected;
-	uint8_t ucReady;
+	uint32_t ulConnectAttemptCount; /*!< Cumulative TCP connection attempts. */
+	uint32_t ulConnectSuccessCount; /*!< Cumulative successful TCP connections. */
+	uint32_t ulDisconnectCount; /*!< Observed connection closures for this status object. */
+	uint32_t ulCommandCount; /*!< Cumulative commands observed by this owner/status object. */
+	uint32_t ulErrorCount; /*!< Cumulative failures; latest cause is retained separately. */
+	uint32_t ulConsecutiveFailures; /*!< Current failure streak used by recovery diagnostics. */
+	uint32_t ulNextRetryDelayMs; /*!< Published reconnection delay in milliseconds. */
+	int32_t lLastResult; /*!< Latest native owner result; zero alone does not prove readiness. */
+	uint8_t ucConnected; /*!< TCP transport connection status, not robot control readiness. */
+	uint8_t ucReady; /*!< Module-specific readiness; consult the producer before issuing work. */
 } Coffee2RobotTcpStatus_t;
 
 /** @brief Store Robot base inputs and action/status coils. */
 typedef struct {
-	uint8_t aucBaseInputs[16];
-	uint8_t aucControlCoils[COFFEE2_ROBOT_CONTROL_COIL_COUNT];
+	uint8_t aucBaseInputs[16]; /*!< Sixteen robot base discrete inputs in protocol order. */
+	uint8_t aucControlCoils[COFFEE2_ROBOT_CONTROL_COIL_COUNT]; /*!< Robot control/result coil snapshot for selected variant. */
 } Coffee2RobotData_t;
 
 extern Coffee2RobotTcpStatus_t g_xCoffee2RobotTcpStatus;

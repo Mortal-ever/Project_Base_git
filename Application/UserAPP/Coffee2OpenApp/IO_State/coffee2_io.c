@@ -120,6 +120,8 @@ void vCoffee2IoRefreshLocal(void)
 	uint8_t ucLogChanges;
 	uint8_t ucIndex;
 
+	/* Sample outside the image lock. DI is active-low; DO uses ODR level,
+	 * which is a commanded electrical state, not a contact sensor. */
 	for (ucIndex = 0U; ucIndex < COFFEE2_LOCAL_IO_COUNT; ucIndex++) {
 		aucInputs[ucIndex] =
 			(HAL_GPIO_ReadPin(s_axInputPoints[ucIndex].pxPort,
@@ -130,6 +132,8 @@ void vCoffee2IoRefreshLocal(void)
 				s_axOutputPoints[ucIndex].usPin) != 0U) ? 1U : 0U;
 	}
 	taskENTER_CRITICAL();
+	/* Publish one coherent image with timestamps; keep old values for
+	 * edge-only logging after leaving the critical section. */
 	memcpy(aucOldInputs, g_xCoffee2Io.xInput.aucXPin,
 		sizeof(aucOldInputs));
 	memcpy(aucOldOutputs, g_xCoffee2Io.xOutput.aucYPin,
@@ -188,6 +192,8 @@ uint8_t ucCoffee2IoSetLocalOutput(uint8_t ucIndex, uint8_t ucValue)
 }
 
 /*-----------------------------------------------------------*/
+/** @brief Replace all eight local outputs from bits 0..7 of the mask.
+ * Zero bits turn outputs off. This path bypasses workflow ownership. */
 uint8_t ucCoffee2IoApplyLocalDebugMask(uint16_t usMask)
 {
 	uint8_t ucIndex;

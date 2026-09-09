@@ -22,6 +22,7 @@
 
 #include "coffee2_device_bindings.h"
 
+/** @brief Bounded completion history; match both sequence and generation. */
 typedef struct {
 	uint32_t ulCommandId;
 	uint32_t ulOrderEpoch;
@@ -102,6 +103,8 @@ int32_t lCoffee2DeviceGetTerminalResult(Coffee2DeviceId_e xDeviceId,
 		(xDeviceId >= COFFEE2_DEVICE_COUNT)) {
 		return 0;
 	}
+	/* Search committed history under the same lock as owner publication.
+	 * Missing records return zero with validity clear, not confirmed success. */
 	lResult = 0;
 	taskENTER_CRITICAL();
 	for (ucIndex = 0U; ucIndex < COFFEE2_TERMINAL_HISTORY_COUNT;
@@ -249,6 +252,7 @@ static BaseType_t prvSubmit(Coffee2Command_t *pxCommand,
 	if (xQueue == NULL) {
 		return pdFAIL;
 	}
+	/* Allocate a nonzero identity before copying the message into its owner queue. */
 	if (pxCommand->ulCommandId == 0U) {
 		taskENTER_CRITICAL();
 		s_ulNextCommandId++;
@@ -269,6 +273,9 @@ static BaseType_t prvSubmit(Coffee2Command_t *pxCommand,
 		ucUrgent = (pxCommand->usAction != COFFEE2_ACTION_REFRESH) ?
 			1U : 0U;
 	}
+	/* Queue insertion copies all fields; it does not preempt an active IO.
+	 * A failed insertion must return any acquired manual reservation. */
+	/* Queue insertion copies the complete command; failure releases any manual reservation. */
 	xResult = (ucUrgent != 0U) ?
 		xQueueSendToFront(xQueue, pxCommand, xWaitTicks) :
 		xQueueSend(xQueue, pxCommand, xWaitTicks);
@@ -380,6 +387,8 @@ void vCoffee2DeviceCommandCompleted(const Coffee2Command_t *pxCommand,
 	}
 
 	taskENTER_CRITICAL();
+	/* Commit identity and result before waking consumers. The bounded ring
+	 * retains completions even if a following refresh replaces live status. */
 	ucHistoryIndex = s_aucTerminalHistoryHead[ucDeviceId];
 	s_aaxTerminalHistory[ucDeviceId][ucHistoryIndex].ulCommandId =
 		pxCommand->ulCommandId;
@@ -591,6 +600,8 @@ EventBits_t xCoffee2DeviceWaitCommand(Coffee2DeviceId_e xDeviceId,
 		(ulCommandId == 0U)) {
 		return 0U;
 	}
+	/* Event bits are only wakeups. Search history and retained snapshots
+	 * for the exact (epoch, command id), within this call's tick budget. */
 	xWaitStart = xTaskGetTickCount();
 	for (;;) {
 		taskENTER_CRITICAL();

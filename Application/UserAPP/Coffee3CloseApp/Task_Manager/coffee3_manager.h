@@ -16,12 +16,12 @@ extern "C" {
 
 /** @brief Define Coffee3 task-manager startup results. */
 typedef enum {
-	APP_TASK_MANAGER_RESULT_OK = 0,
-	APP_TASK_MANAGER_RESULT_ALREADY_CREATED = 1,
-	APP_TASK_MANAGER_RESULT_NO_RESOURCE = -1,
-	APP_TASK_MANAGER_RESULT_LOG_INIT = -2,
-	APP_TASK_MANAGER_RESULT_SERIAL_INIT = -3,
-	APP_TASK_MANAGER_RESULT_MODULE_INIT = -4
+	APP_TASK_MANAGER_RESULT_OK = 0,               // 启动成功
+	APP_TASK_MANAGER_RESULT_ALREADY_CREATED = 1,  // 任务管理器已经创建过
+	APP_TASK_MANAGER_RESULT_NO_RESOURCE = -1,     // 系统资源不足
+	APP_TASK_MANAGER_RESULT_LOG_INIT = -2,        // 日志子系统初始化失败
+	APP_TASK_MANAGER_RESULT_SERIAL_INIT = -3,     // 串行通信模块初始化失败
+	APP_TASK_MANAGER_RESULT_MODULE_INIT = -4      // 产品模块初始化失败
 } AppTaskManagerResult_e;
 
 /** @brief Identify Coffee3 application tasks in startup masks. */
@@ -37,22 +37,22 @@ typedef enum {
 
 /** @brief Store observable Coffee3 startup and network readiness. */
 typedef struct {
-	AppTaskManagerResult_e xStartResult;
-	uint32_t ulResetCause;
-	uint32_t ulTaskCreatedMask;
-	uint32_t ulTaskFailedMask;
-	uint32_t ulFreeHeapBeforeTasks;
-	uint32_t ulFreeHeapAfterTasks;
-	uint8_t ucInfrastructureCreated;
-	uint8_t ucTasksCreated;
+	AppTaskManagerResult_e xStartResult; /*!< Software startup result, not physical initialization outcome. */
+	uint32_t ulResetCause; /*!< Captured RCC reset-cause mask before hardware flags are cleared. */
+	uint32_t ulTaskCreatedMask; /*!< Task bits successfully created during startup. */
+	uint32_t ulTaskFailedMask; /*!< Task bits whose resource allocation failed. */
+	uint32_t ulFreeHeapBeforeTasks; /*!< FreeRTOS free heap bytes before task allocation. */
+	uint32_t ulFreeHeapAfterTasks; /*!< FreeRTOS free heap bytes after task allocation. */
+	uint8_t ucInfrastructureCreated; /*!< Prevents repeating completed module construction. */
+	uint8_t ucTasksCreated; /*!< Core task creation sequence completed successfully. */
 	uint8_t ucLogReady; /*!< Log Transport and C3Log task are ready. */
-	uint8_t ucDeviceReady;
-	uint8_t ucServerReady;
-	uint8_t ucRobotReady;
-	uint8_t ucRtuReady;
-	uint8_t ucWorkflowReady;
-	uint8_t ucNetworkStackReady;
-	uint8_t ucNetworkReady;
+	uint8_t ucDeviceReady; /*!< Device software events/routes initialized; no hardware proof. */
+	uint8_t ucServerReady; /*!< Server software initialized; no client required yet. */
+	uint8_t ucRobotReady; /*!< Robot software initialized; transport may still be offline. */
+	uint8_t ucRtuReady; /*!< RTU queues initialized; UART owner opens later in its task. */
+	uint8_t ucWorkflowReady; /*!< Order/service software initialized; residual check is later. */
+	uint8_t ucNetworkStackReady; /*!< Default task has returned from lwIP initialization. */
+	uint8_t ucNetworkReady; /*!< Current link, netif and IPv4 readiness, updated periodically. */
 } AppTaskManagerStatus_t;
 
 /**

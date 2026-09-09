@@ -21,21 +21,21 @@ extern "C" {
 
 /** @brief Configure one physical Coffee3 UART bus owner. */
 typedef struct {
-    UART_HandleTypeDef *pxUart;
-    const char *pcName;
-    uint32_t ulDefaultBaudRate;
-    uint8_t ucBusId;
-    uint8_t ucProtocolId;
+    UART_HandleTypeDef *pxUart; /*!< Borrowed HAL UART handle, valid for the entire bus task lifetime. */
+    const char *pcName; /*!< Borrowed static diagnostic name; storage outlives owner tasks. */
+    uint32_t ulDefaultBaudRate; /*!< Product UART baud rate in bits per second. */
+    uint8_t ucBusId; /*!< Physical route number, distinct from the zero-based bus array index. */
+    uint8_t ucProtocolId; /*!< Wire protocol selected for the bound device or bus. */
 } Coffee3RtuBusConfig_t;
 
 /** @brief Store runtime counters for one RTU bus owner task. */
 typedef struct {
-	uint32_t ulCommandCount;
-	uint32_t ulErrorCount;
-	uint32_t ulCurrentBaudRate;
-	int32_t lLastResult;
-	uint8_t ucReady;
-	uint8_t ucActiveDevice;
+	uint32_t ulCommandCount; /*!< Cumulative commands observed by this owner/status object. */
+	uint32_t ulErrorCount; /*!< Cumulative failures; latest cause is retained separately. */
+	uint32_t ulCurrentBaudRate; /*!< Baud rate recorded after owner transport initialization. */
+	int32_t lLastResult; /*!< Latest native owner result; zero alone does not prove readiness. */
+	uint8_t ucReady; /*!< Module-specific readiness; consult the producer before issuing work. */
+	uint8_t ucActiveDevice; /*!< Logical device currently executing on this serial owner. */
 } Coffee3RtuBusStatus_t;
 
 extern Coffee3RtuBusStatus_t

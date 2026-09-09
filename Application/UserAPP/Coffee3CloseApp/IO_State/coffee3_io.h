@@ -57,26 +57,26 @@ typedef enum {
 
 /** @brief Store all input points consumed by workflow and device tasks. */
 typedef struct {
-	uint8_t aucXPin[COFFEE3_LOCAL_IO_COUNT];
-	uint8_t aucMB1XPin[COFFEE3_MODBUS_IO_COUNT];
-	uint8_t aucMB2XPin[COFFEE3_MODBUS_IO_COUNT];
+	uint8_t aucXPin[COFFEE3_LOCAL_IO_COUNT]; /*!< Eight local DI logical values after active-low normalization. */
+	uint8_t aucMB1XPin[COFFEE3_MODBUS_IO_COUNT]; /*!< Sixteen input-module values read from Unit 1. */
+	uint8_t aucMB2XPin[COFFEE3_MODBUS_IO_COUNT]; /*!< Reserved second input array; not a second installed input module. */
 } Coffee3InputIo_t;
 
 /** @brief Store all output points consumed by workflow and device tasks. */
 typedef struct {
-	uint8_t aucYPin[COFFEE3_LOCAL_IO_COUNT];
-	uint8_t aucMB1YPin[COFFEE3_MODBUS_IO_COUNT];
-	uint8_t aucMB2YPin[COFFEE3_MODBUS_IO_COUNT];
+	uint8_t aucYPin[COFFEE3_LOCAL_IO_COUNT]; /*!< Eight local output levels; not relay contact feedback. */
+	uint8_t aucMB1YPin[COFFEE3_MODBUS_IO_COUNT]; /*!< Reserved first module output array in the internal legacy layout. */
+	uint8_t aucMB2YPin[COFFEE3_MODBUS_IO_COUNT]; /*!< Sixteen Unit 2 outputs; projected to host external output group 1. */
 } Coffee3OutputIo_t;
 
 /** @brief Store one coherent global IO image and update metadata. */
 typedef struct {
-	Coffee3InputIo_t xInput;
-	Coffee3OutputIo_t xOutput;
-	uint32_t ulVersion;
-	uint32_t ulLocalUpdateTick;
-	uint32_t aulModbusUpdateTick[2];
-	uint8_t aucModbusValid[2];
+	Coffee3InputIo_t xInput; /*!< Local and module input image owned by this product. */
+	Coffee3OutputIo_t xOutput; /*!< Local and module output image owned by this product. */
+	uint32_t ulVersion; /*!< Incremented on image commits; use snapshot API for coherent reads. */
+	uint32_t ulLocalUpdateTick; /*!< RTOS tick of the latest local GPIO sample/write. */
+	uint32_t aulModbusUpdateTick[2]; /*!< Per-module successful commit timestamps in RTOS ticks. */
+	uint8_t aucModbusValid[2]; /*!< Per-module sample validity; all-zero data may still be valid. */
 } Coffee3IoState_t;
 
 /** @brief Global IO image available to all Coffee3 application modules. */
