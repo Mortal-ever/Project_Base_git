@@ -100,7 +100,7 @@ void vAppLwipAlertReportFailure(AppLogSourceId_t xSource,
 	}
 	taskEXIT_CRITICAL();
 	(void)xAppLogWriteField(APP_LOG_LEVEL_WARNING, xSource,
-		"LWIP_RESOURCE_ALERT", lNativeError, "tcp_pcb_used",
+		"LWIP_RESOURCE_REPORT", lNativeError, "tcp_pcb_used",
 		(int32_t)ulTcpPcbUsed);
 
 	for (ucResource = 0U;
@@ -238,3 +238,4 @@ void vAppLwipAlertReportFailure(AppLogSourceId_t xSource,
 }
 
 #endif
+

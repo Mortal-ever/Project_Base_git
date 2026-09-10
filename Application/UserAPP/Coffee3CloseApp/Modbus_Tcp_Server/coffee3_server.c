@@ -69,8 +69,6 @@ static uint8_t s_ucOrderLatched;
 static uint8_t s_ucOtaRejectLogged;
 /** @brief Defer the legacy 0x0201 reset to the Server owner loop. */
 static uint8_t s_ucOtaResetPending;
-/** @brief Tick captured when the legacy reset command is accepted. */
-static TickType_t s_xOtaResetRequestTick;
 
 /**
   * @brief  Log one accepted client with its actual peer IPv4 endpoint.
@@ -226,7 +224,6 @@ BaseType_t xCoffee3ServerInitialize(void)
 	s_ucOrderLatched = 0U;
 	s_ucOtaRejectLogged = 0U;
 	s_ucOtaResetPending = 0U;
-	s_xOtaResetRequestTick = 0U;
 	g_xCoffee3ServerStatus.usListenPort = COFFEE3_SERVER_PORT;
 	return pdPASS;
 }
@@ -302,9 +299,22 @@ void vCoffee3ServerTask(void *pvArgument)
 		"clients", 0);
 
 	for (;;) {
-		if ((s_ucOtaResetPending != 0U) &&
-			((xTaskGetTickCount() - s_xOtaResetRequestTick) >=
-			pdMS_TO_TICKS(COFFEE3_SERVER_OTA_RESET_DELAY_MS))) {
+		if (s_ucOtaResetPending != 0U) {
+			if (lListener >= 0) {
+				(void)lwip_close(lListener);
+				lListener = -1;
+			}
+			for (ucIndex = 0U; ucIndex < COFFEE3_SERVER_MAX_CLIENTS;
+				ucIndex++) {
+				prvCloseSlot(&axSlots[ucIndex],
+					&g_xCoffee3ServerStatus.axClient[ucIndex], ucIndex,
+					(int32_t)TRANSPORT_RESULT_DISCONNECTED);
+			}
+			vCoffee3RobotTcpRequestShutdown();
+			(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_SERVER,
+				"TCP_CONNECTIONS_CLOSING_FOR_RESET", 0);
+			vTaskDelay(pdMS_TO_TICKS(COFFEE3_SERVER_OTA_RESET_DELAY_MS));
 			(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_SERVER, "OTA_SOFT_RESET", 0);
 			NVIC_SystemReset();
@@ -723,12 +733,6 @@ static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 	uint16_t usValue)
 {
 	if (usAddress == COFFEE3_REG_LOCAL_IO_DEBUG) {
-		if (ucCoffee3WorkflowInitializationComplete() == 0U) {
-			(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_SERVER,
-				"IO_DEBUG_REJECTED_NOT_INITIALIZED", -1001);
-			return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
-		}
 		if ((usValue & 0xFF00U) != 0U) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
@@ -793,12 +797,7 @@ static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 			(uint32_t)COFFEE3_REG_EXTERNAL_IO_DEBUG + 1U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
 	}
-	if (ucCoffee3WorkflowInitializationComplete() == 0U) {
-		(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_WARNING,
-			COFFEE3_LOG_SOURCE_SERVER,
-			"IO_DEBUG_REJECTED_NOT_INITIALIZED", -1001);
-		return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
-	}
+
 	if ((usAddress == COFFEE3_REG_LOCAL_IO_DEBUG) &&
 		((pusRegisters[0] & 0xFF00U) != 0U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
@@ -896,15 +895,16 @@ static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 	BaseType_t xResult;
 	uint16_t usIndex;
 
+
 	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
-		if (((uint32_t)usAddress + usIndex <=
-			(uint32_t)COFFEE3_SERVER_UPGRADE_BASE + 1U) &&
+		/* F123 is a host debug path: reservation failure is never a protocol rejection. */
+		if (((uint32_t)usAddress + usIndex ==
+			(uint32_t)COFFEE3_SERVER_UPGRADE_BASE) &&
 			(pusRegisters[usIndex] == 1U) &&
 			(xCoffee3WorkflowAcquireOta() != pdPASS)) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
-				"OTA/reset rejected: machine busy, outlet occupied or outputs not verified off");
-			return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+				"OTA_DEBUG_BYPASS: reservation unavailable; command accepted");
 		}
 	}
 
@@ -931,11 +931,10 @@ static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 		usValue = pusRegisters[(COFFEE3_SERVER_UPGRADE_BASE + 1U) -
 			usAddress];
 		if (usValue == 1U) {
-			s_xOtaResetRequestTick = xTaskGetTickCount();
 			s_ucOtaResetPending = 1U;
 			(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_SERVER,
-				"OTA_SOFT_RESET_SCHEDULED", 0);
+				"F123_RESET_ACCEPTED", 0);
 		}
 	}
 	if ((usAddress <= (COFFEE3_SERVER_UPGRADE_BASE + 2U)) &&
@@ -1347,23 +1346,22 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	Coffee3Command_t xCommand;
 	uint8_t ucDebug;
 
-	ucDebug = ((xAction == COFFEE3_ACTION_IO_WRITE_MASK) ||
-		((xAction >= COFFEE3_ACTION_ROBOT_START) &&
-		 (xAction <= COFFEE3_ACTION_ROBOT_MANUAL_MODE))) ? 1U : 0U;
-	if ((ucDebug != 0U) &&
-		(ucCoffee3WorkflowInitializationComplete() == 0U)) {
+	/* Robot body controls need TCP only; custom-program actions need READY.
+	 * Other device debug retains its existing online/ready boundary. */
+	ucDebug = 1U;
+	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
+		(xDeviceId >= COFFEE3_DEVICE_COUNT) ||
+		(((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
+		  (xAction >= COFFEE3_ACTION_ROBOT_START) &&
+		  (xAction <= COFFEE3_ACTION_ROBOT_MANUAL_MODE)) ?
+		 (g_xCoffee3RobotTcpStatus.ucConnected == 0U) :
+		 ((g_axCoffee3DeviceStatus[xDeviceId].ucOnline == 0U) ||
+		  (g_axCoffee3DeviceStatus[xDeviceId].ucReady == 0U)))) {
 		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			"DEBUG_COMMAND_REJECTED_NOT_INITIALIZED", -1001,
-			"action", (int32_t)xAction);
+			"DEBUG_COMMAND_REJECTED_DEVICE_NOT_READY", -4,
+			"device", (int32_t)xDeviceId);
 		return 0U;
-	}
-
-	if ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-		(xAction == COFFEE3_ACTION_ROBOT_STOP) &&
-		(g_xCoffee3WorkflowStatus.xState == COFFEE3_WORKFLOW_RUNNING)) {
-		vCoffee3WorkflowRequestCancel();
-		return 1U;
 	}
 	memset(&xCommand, 0, sizeof(xCommand));
 	xCommand.ucDeviceId = (uint8_t)xDeviceId;
@@ -1374,21 +1372,17 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	xCommand.ausParameter[1] = usParameter1;
 	xCommand.ulTimeoutMs = COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS;
 	xCommand.ucRetryLimit = 1U;
-	if ((xAction == COFFEE3_ACTION_IO_WRITE_MASK) ||
-		((xAction >= COFFEE3_ACTION_ROBOT_START) &&
-		 (xAction <= COFFEE3_ACTION_ROBOT_MANUAL_MODE))) {
+	if (ucDebug != 0U) {
 		xCommand.ucFlags |= COFFEE3_COMMAND_FLAG_DEBUG;
 	}
 	if (xAction == COFFEE3_ACTION_IO_WRITE_MASK) {
 		xCommand.ulTimeoutMs = COFFEE3_RTU_IO_TIMEOUT_MS;
 		xCommand.ucRetryLimit = 0U;
 	}
-	if (((xDeviceId == COFFEE3_DEVICE_ROBOT) ?
-		xCoffee3CommandSubmitUrgent(&xCommand, 0U) :
-		xCoffee3CommandSubmit(&xCommand, 0U)) != pdPASS) {
+	if (xCoffee3CommandSubmitUrgent(&xCommand, pdMS_TO_TICKS(100U)) != pdPASS) {
 		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			"Manual rejected: automatic owner busy or queue full",
+			"DEBUG_COMMAND_QUEUE_FULL: command not enqueued",
 			-1, "action", (int32_t)xAction);
 		return 0U;
 	}
@@ -1923,3 +1917,4 @@ static void prvUpdateActiveClientCount(void)
 			"clients", 0);
 	}
 }
+

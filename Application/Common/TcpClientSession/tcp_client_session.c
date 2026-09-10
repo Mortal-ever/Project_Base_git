@@ -44,6 +44,9 @@ BaseType_t xTcpClientSessionInit(TcpClientSession_t *pxSession,
 /*-----------------------------------------------------------*/
 void vTcpClientSessionProcess(TcpClientSession_t *pxSession)
 {
+	/* NETWORK_WAIT -> BACKOFF -> CONNECTING -> PROTOCOL_CHECK -> ONLINE.
+	 * Product callbacks validate the protocol and publish device-specific state.
+	 */
 	TransportResult_e xTransportResult;
 	int32_t lProbeResult;
 
@@ -173,3 +176,4 @@ static uint8_t prvNetworkReady(const TcpClientSession_t *pxSession)
 	return pxSession->pxConfig->ucNetworkReady(
 		pxSession->pvOwnerContext);
 }
+

@@ -11,7 +11,7 @@
   *
   * @attention
   * - One owner task must serialize Process and ForceReconnect calls.
-  * - The probe callback must not issue a robot action or change business state.
+  * - The probe may reset a session handshake, but must not issue physical actions.
   */
 
 #ifndef TCP_CLIENT_SESSION_H
@@ -38,7 +38,7 @@ typedef enum {
 /** @brief Read whether the shared product network is ready for TCP use. */
 typedef uint8_t (*TcpClientSessionNetworkReadyFn_t)(void *pvOwnerContext);
 
-/** @brief Execute a side-effect-free protocol availability check. */
+/** @brief Check protocol availability; an owner may initialize its session handshake. */
 typedef int32_t (*TcpClientSessionProbeFn_t)(void *pvOwnerContext,
 	uint32_t ulTimeoutMs);
 

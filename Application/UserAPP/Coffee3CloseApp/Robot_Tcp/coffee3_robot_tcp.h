@@ -25,7 +25,7 @@ extern "C" {
 #define COFFEE3_ROBOT_CONTROL_COIL_COUNT  40U
 #endif
 
-/** @brief Store Robot TCP lifecycle and transaction counters. */
+/** @brief Store Robot TCP lifecycle and command-owner status. */
 typedef struct {
 	uint32_t ulConnectAttemptCount; /*!< Cumulative TCP connection attempts. */
 	uint32_t ulConnectSuccessCount; /*!< Cumulative successful TCP connections. */
@@ -39,7 +39,7 @@ typedef struct {
 	uint8_t ucReady; /*!< Module-specific readiness; consult the producer before issuing work. */
 } Coffee3RobotTcpStatus_t;
 
-/** @brief Store Robot base inputs and action/status coils. */
+/** @brief Store the last controller snapshot used for safety decisions. */
 typedef struct {
 	uint8_t aucBaseInputs[16]; /*!< Sixteen robot base discrete inputs in protocol order. */
 	uint8_t aucControlCoils[COFFEE3_ROBOT_CONTROL_COIL_COUNT]; /*!< Robot control/result coil snapshot for selected variant. */
@@ -61,8 +61,15 @@ BaseType_t xCoffee3RobotTcpInitialize(void);
   */
 void vCoffee3RobotTcpTask(void *pvArgument);
 
+/** @brief Request the Robot TCP owner to close its socket before reset. */
+void vCoffee3RobotTcpRequestShutdown(void);
+/** @brief Return nonzero after the Robot TCP socket has been closed. */
+uint8_t ucCoffee3RobotTcpShutdownComplete(void);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* COFFEE3_ROBOT_TCP_H */
+
+

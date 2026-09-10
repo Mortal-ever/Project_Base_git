@@ -128,8 +128,10 @@ static uint8_t prvCommandCanceled(const void *pvContext);
 HAL_StatusTypeDef xCoffee3SerialApplyDefaults(void)
 {
 	HAL_StatusTypeDef xResult;
+	// 重新初始化所有总线 UART 为 8-N-1，波特率为默认值。
+	xResult = prvConfigureUart(&huart2, 
+			COFFEE3_BUS2_DEFAULT_BAUD);
 
-	xResult = prvConfigureUart(&huart2, COFFEE3_BUS2_DEFAULT_BAUD);
 	if (xResult == HAL_OK) {
 		xResult = prvConfigureUart(&huart3,
 			COFFEE3_BUS3_DEFAULT_BAUD);

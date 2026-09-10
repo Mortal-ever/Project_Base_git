@@ -877,3 +877,30 @@
 | 2026-09-08 | `资料文档/03_技术实现核心文档/04_执行报告与审计/源码注释与学习可读性规范.md` | Add | 固化按逻辑模块分段注释、关键变量/宏/枚举/结构体/指针注释、函数契约、注释密度、公共/私有边界和落地验收规则；未修改源码。 |
 | 2026-09-08 | `资料文档/03_技术实现核心文档/04_执行报告与审计/当前工程完整源码带读文档重建方案.md` | Add | 基于当前公共/私有边界和 Coffee2Open、Coffee3Close 双 Target 构建入口，规划 22 册源码教材、逐函数/逐类型讲解模板、调用链、覆盖矩阵和验收规则；未修改源码、构建配置或 IOC。 |
 | 2026-09-08 | `Application/UserAPP/Coffee2OpenApp`、`Application/UserAPP/Coffee3CloseApp`（注释相关 .c/.h） | Modify | 按源码注释规范补充关键命令、状态、IO、Workflow、日志和任务边界说明；仅增加英文块注释，未改变运行逻辑。 |
+
+| 2026-09-09 | 资料文档/03_技术实现核心文档/04_执行报告与审计/源码教材编写规范.md; 资料文档/03_技术实现核心文档/04_执行报告与审计/源码教材章节模板.md; 资料文档/03_技术实现核心文档/02_源码解读/源码详解/06_ProtocolStack_ModbusPort与nanoMODBUS.md | Add/Rewrite | 建立设计先行、源码验证、场景闭环的教材编写规范和章节模板；以 nanoMODBUS 与 ModbusPort 为第一层样章，明确第三方库、公共适配层、初始化顺序、函数指针、错误映射、调试练习和下一层阅读路径。未修改固件行为。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c | Fix | 修正机器人可运行判定：仅当 ENABLED=1、ALARM=0 且真实 RUNNING=1 时才允许残杯、生产和控制动作；READY 或 IDLE 不再单独代表可运行，启动流程会对 STOPPED/IDLE 状态继续执行 START 并等待 RUNNING。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; Application/UserAPP/Coffee3CloseApp/Device/coffee3_device.c | Fix | 将上位机手动调试命令统一标记为 DEBUG 并通过最高优先级队列，不再受初始化完成、自动流程占用或机器人 STOP 改写影响；IO 调试移除未初始化拦截；F123 复位寄存器独立于 OTA 资源门禁，收到后记录 F123_RESET_ACCEPTED 并执行软复位调度。非法地址/值仍按协议异常返回。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c | Fix | F123 OTA/复位调试写入不再因工作流资源预约失败而返回设备故障；预约仅作为协调提示，命令继续接受，实际 HTTP 初始化结果单独记录。GCC Coffee3Close Debug 构建通过。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/WorkFlow/coffee3_workflow.c | Fix | 将残杯安全检查与设备能力解耦：残杯检查成功后只记录一次；机器人 HOME、出餐门和其他设备采用可恢复状态；订单、热水、清洗、手动制冰按实际设备依赖判定；设备恢复后由 Workflow 周期重新评估。调试命令仍不受这些状态拦截。GCC Coffee3Close Debug 构建通过。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/WorkFlow/coffee3_workflow.c; Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c | Fix | 修正上电后残杯检查未触发：IO 模块采用在线且数据新鲜判定，不再错误依赖 RTU 的 ucReady；手动调试命令保留业务旁路，但目标设备必须在线且 ready，否则立即记录 DEBUG_COMMAND_REJECTED_DEVICE_NOT_READY 并不入队。GCC Coffee3Close Debug 构建通过。 |
+
+| 2026-09-09 | Application/UserAPP/Coffee3CloseApp/Config/coffee3_app_config.h | Tune | Robot TCP 单次连接窗口从 3000 ms 调整为 10000 ms；最大重试退避保持 30000 ms，用于单变量观察机器人服务启动延迟影响。 |
+
+| 2026-09-10 | Application/UserAPP/Coffee3CloseApp/WorkFlow/coffee3_workflow.c | Fix | 取消残杯通过后的后台自动 HOME 维护任务；机器人调试动作不再被强制追加 HOME。HOME 仅保留在订单流程开始步骤，确保订单开始前回 HOME；连续机器人调试命令继续采用最新动作覆盖旧动作，避免等待已被替换的动作完成。GCC Coffee3Close Debug 构建通过。 |
+
+
+| 2026-09-10 | Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; Robot_Tcp/coffee3_robot_tcp.c/.h | Fix | F123 地址513软件复位前主动关闭Server监听 socket、全部客户端 slot，并请求机器人 TCP owner 关闭客户端连接；增加复位前连接关闭日志，避免旧 TCP 僵尸连接影响重启后的设备重连。GCC Coffee3Close Debug 构建通过。 |
+| 2026-09-10 | Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c | Fix | 删除已取消复位延迟逻辑的 s_xOtaResetRequestTick 及其赋值，消除 ARMCC #550-D set-but-never-used 警告；GCC Coffee3Close Debug 复核 0 warning/0 error。 |
+| 2026-09-10 | Application/UserAPP/Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c; Application/Common/LwipAlert/app_lwip_alert.c | Tune | Robot retry backoff cap now follows COFFEE3_ROBOT_RETRY_MAX_MS (20s); rename resource usage event to LWIP_RESOURCE_REPORT while preserving tcp_pcb_used semantics. GCC Coffee3Close Debug build passed. |
+## 2026-09-10 Coffee3 robot connection and command boundaries
+
+- Modified Coffee3 Robot_Tcp/coffee3_robot_tcp.c and Modbus_Tcp_Server/coffee3_server.c: body controls require TCP only; custom program actions require running/fresh readiness; reconnect clears 3100.
+- Modified Transport/Inc/transport_tcp.h and Transport/Src/transport_tcp.c: optional product-owned persistent local-port reservation and explicit bind; NULL keeps legacy behavior.
+- Modified Common/TcpClientSession/tcp_client_session.h: document session-handshake probe semantics.
+- Reserved VG Flash sectors 10/11 for Coffee3 append-only port journal, outside application/OTA; added Coffee3机器人本体边界与重连端口持久化.md with scope, partition evidence and bench acceptance.

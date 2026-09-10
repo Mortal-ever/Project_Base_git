@@ -69,17 +69,20 @@ Coffee3LogResult_e xCoffee3LogInitWithTransport(uint8_t ucEnableTransport)
 	if (g_xAppLogStatus.ucInitialized != 0U) {
 		return COFFEE3_LOG_RESULT_ALREADY_INITIALIZED;
 	}
-	memset(&xConfig, 0, sizeof(xConfig));
-	memset(&xUartConfig, 0, sizeof(xUartConfig));
+	// 防御性清零，未赋字段保证零值语义
+	memset(&xConfig, 0, sizeof(xConfig));			
+	memset(&xUartConfig, 0, sizeof(xUartConfig));	
 	xTransportResult = TRANSPORT_RESULT_NOT_READY;
-	xConfig.pxSourceTable = s_axCoffee3LogSources;
-	xConfig.ucSourceCount = COFFEE3_LOG_SOURCE_COUNT;
+	// 绑定 Coffee3 日志源表
+	xConfig.pxSourceTable = s_axCoffee3LogSources; 	
+	xConfig.ucSourceCount = COFFEE3_LOG_SOURCE_COUNT; 
+	// 仅在请求时创建 USART1 传输
 	if (ucEnableTransport != 0U) {
-		if (huart1.Instance == NULL) {
+		if (huart1.Instance == NULL) { // USART1 若未初始化，无法创建传输
 			xTransportResult = TRANSPORT_RESULT_NOT_OPEN;
 		} else {
 			xUartConfig.pxUart = &huart1;
-			xUartConfig.ucReceiveEnabled = 0U;
+			xUartConfig.ucReceiveEnabled = 0U; // 禁用中断接收，日志仅发送
 			xTransportResult = xTransportUartCreate(
 				&s_xCoffee3LogChannel, &s_xCoffee3LogTransport,
 				"coffee3_log_uart", &xUartConfig);
@@ -97,7 +100,7 @@ Coffee3LogResult_e xCoffee3LogInitWithTransport(uint8_t ucEnableTransport)
 		g_xAppLogStatus.lLastTransportError =
 			(int32_t)xTransportResult;
 	}
-	return (Coffee3LogResult_e)xLogResult;
+	return (Coffee3LogResult_e)xLogResult; // 直接强转,返回日志服务结果
 }
 
 /*-----------------------------------------------------------*/

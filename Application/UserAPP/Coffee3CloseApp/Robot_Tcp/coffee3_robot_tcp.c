@@ -22,6 +22,90 @@
 #include "task.h"
 #include "TcpClientSession/tcp_client_session.h"
 #include "transport_tcp.h"
+#include "stm32f4xx_hal.h"
+#include "Ota/app_ota_flash.h"
+
+/* VG-only journal: sectors 10/11, outside application and OTA staging.
+ * Each committed record reserves a port BEFORE its SYN can be sent.
+ * The other sector retains the last record during rollover erase. */
+#define C3_PORT_BANK0 0x080C0000UL
+#define C3_PORT_BANK1 0x080E0000UL
+#define C3_PORT_END   0x08100000UL
+#define C3_PORT_MAGIC 0x43535054UL
+static uint8_t s_ucFreshReadyReset;
+
+static uint16_t prvReserveRobotPort(void)
+{
+	uint32_t ulAddress, ulLatest = 0U, ulSequence = 0U;
+	uint32_t ulBank, ulEnd, ulSlot, ulError;
+	const volatile uint32_t *pulRecord;
+	FLASH_EraseInitTypeDef xErase;
+	HAL_StatusTypeDef xResult = HAL_OK;
+	uint16_t usPort;
+
+	if (*(const volatile uint16_t *)FLASHSIZE_BASE != 1024U) {
+		(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_ERROR,
+			COFFEE3_LOG_SOURCE_ROBOT, "Source port journal requires 1MB Flash", -1);
+		return 0U;
+	}
+	for (ulAddress = C3_PORT_BANK0; ulAddress < C3_PORT_END; ulAddress += 16U) {
+		pulRecord = (const volatile uint32_t *)ulAddress;
+		if ((pulRecord[0] == C3_PORT_MAGIC) &&
+			(pulRecord[2] == ~pulRecord[1]) && (pulRecord[3] == 0U) &&
+			((ulLatest == 0U) || ((int32_t)(pulRecord[1] - ulSequence) > 0))) {
+			ulSequence = pulRecord[1];
+			ulLatest = ulAddress;
+		}
+	}
+	ulBank = (ulLatest >= C3_PORT_BANK1) ? C3_PORT_BANK1 : C3_PORT_BANK0;
+	ulEnd = ulBank + 0x20000UL;
+	ulSlot = (ulLatest == 0U) ? ulBank : ulLatest + 16U;
+	for (; ulSlot < ulEnd; ulSlot += 16U) {
+		pulRecord = (const volatile uint32_t *)ulSlot;
+		if ((pulRecord[0] == 0xFFFFFFFFUL) && (pulRecord[1] == 0xFFFFFFFFUL) &&
+			(pulRecord[2] == 0xFFFFFFFFUL) && (pulRecord[3] == 0xFFFFFFFFUL)) {
+			break;
+		}
+	}
+	/* Serialize with the task-owned OTA writer, without disabling IRQs. */
+	vTaskSuspendAll();
+	if (ucAppOtaFlashIsActive() != 0U) {
+		(void)xTaskResumeAll();
+		return 0U;
+	}
+	xResult = HAL_FLASH_Unlock();
+	if ((xResult == HAL_OK) && (ulSlot >= ulEnd)) {
+		ulSlot = (ulBank == C3_PORT_BANK0) ? C3_PORT_BANK1 : C3_PORT_BANK0;
+		memset(&xErase, 0, sizeof(xErase));
+		xErase.TypeErase = FLASH_TYPEERASE_SECTORS;
+		xErase.Sector = (ulSlot == C3_PORT_BANK0) ? FLASH_SECTOR_10 : FLASH_SECTOR_11;
+		xErase.NbSectors = 1U;
+		xErase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+		xResult = HAL_FLASHEx_Erase(&xErase, &ulError);
+	}
+	ulSequence++;
+	if (xResult == HAL_OK) xResult = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, ulSlot, C3_PORT_MAGIC);
+	if (xResult == HAL_OK) xResult = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, ulSlot + 4U, ulSequence);
+	if (xResult == HAL_OK) xResult = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, ulSlot + 8U, ~ulSequence);
+	if (xResult == HAL_OK) xResult = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, ulSlot + 12U, 0U);
+	if (HAL_FLASH_Lock() != HAL_OK) xResult = HAL_ERROR;
+	pulRecord = (const volatile uint32_t *)ulSlot;
+	if ((xResult == HAL_OK) && ((pulRecord[0] != C3_PORT_MAGIC) ||
+		(pulRecord[1] != ulSequence) || (pulRecord[2] != ~ulSequence) ||
+		(pulRecord[3] != 0U))) xResult = HAL_ERROR;
+	(void)xTaskResumeAll();
+	if (xResult != HAL_OK) {
+		(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_ERROR,
+			COFFEE3_LOG_SOURCE_ROBOT, "Source port persistence failed; connect deferred", (int32_t)xResult);
+		return 0U;
+	}
+	usPort = (uint16_t)(49152UL + ((ulSequence - 1U) % 16384UL));
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_ROBOT, COFFEE3_LOG_ORDER_SYSTEM,
+		"TCP source port reserved=%u destination=502 sequence=%lu", (unsigned int)usPort,
+		(unsigned long)ulSequence);
+	return usPort;
+}
 
 /** @brief Period between connected Robot health snapshots. */
 #define COFFEE3_ROBOT_HEALTH_MS              2000U
@@ -171,6 +255,8 @@ static uint8_t prvResolveCoffee3Dobot(const Coffee3Command_t *pxCommand,
 }
 
 /*-----------------------------------------------------------*/
+/* Map product action identifiers to readable diagnostics. */
+/* Map product actions to readable diagnostics. */
 static const char *prvRobotActionName(uint16_t usAction)
 {
 	switch ((Coffee3Action_e)usAction) {
@@ -220,6 +306,8 @@ typedef struct {
 	uint8_t ucResultWhileCommandHigh;
 	Coffee3RobotPhase_e xPhase;
 } Coffee3RobotTransaction_t;
+
+/* Motion transactions are owned by this task through acceptance, movement, and result acknowledgement. */
 
 typedef struct {
 	ModbusPort_t *pxPort;
@@ -455,8 +543,22 @@ static void prvSetRobotReady(uint8_t ucReady);
   */
 static uint32_t prvRetryDelayMs(uint32_t ulFailures);
 
+static volatile uint8_t s_ucRobotShutdownRequested; // 请求关闭的标志
+static volatile uint8_t s_ucRobotShutdownComplete;	// 关闭完成的标志
+
+void vCoffee3RobotTcpRequestShutdown(void)
+{
+	s_ucRobotShutdownComplete = 0U;
+	s_ucRobotShutdownRequested = 1U;
+}
+
+uint8_t ucCoffee3RobotTcpShutdownComplete(void)
+{
+	return s_ucRobotShutdownComplete;
+}
+
 static const uint32_t s_aulCoffee3RobotRetryDelayMs[] = {
-	1000U, 2000U, 5000U, 10000U, 30000U
+	1000U, 2000U, 5000U, 10000U, COFFEE3_ROBOT_RETRY_MAX_MS
 };
 
 static const TcpClientSessionConfig_t s_xCoffee3RobotSessionConfig = {
@@ -516,40 +618,54 @@ static void prvLogRobotConnected(const uint8_t pucIpv4[4], uint16_t usPort,
 /*-----------------------------------------------------------*/
 void vCoffee3RobotTcpTask(void *pvArgument)
 {
-	TransportChannel_t xChannel;
-	TransportTcpContext_t xTransport;
-	TransportTcpConfig_t xConfig;
-	ModbusPort_t xPort;
-	TcpClientSession_t xSession;
-	Coffee3RobotSessionContext_t xSessionContext;
-	Coffee3Command_t xCommand;
-	Coffee3Command_t xDeferredCommand;
-	Coffee3RobotTransaction_t xTransaction;
-	Coffee3DobotCommand_t xResolvedCommand;
-	TransportResult_e xTransportResult;
-	ModbusPortResult_e xResult;
-	Coffee3RobotStartupOutcome_e xStartupOutcome;
-	TickType_t xNextStartupRetryTick;
-	TickType_t xNextHealthTick;
-	uint32_t ulStartupFailures;
-	uint8_t ucCreated;
-	uint8_t ucSessionReady;
-	uint8_t ucDone;
-	uint8_t ucWorkflowTransaction;
-	uint8_t ucReconciledSession;
-	uint8_t ucRecoveryWaitingLogged;
-	uint8_t ucDeferredCommand;
-	uint8_t ucSessionCommandPending;
-	uint8_t ucWarmAttachLogged;
-	uint8_t ucActionTimedOut;
-	uint8_t ucLinkProbeAttempted;
-	uint8_t ucLinkConfirmed;
-	BaseType_t xCommandReceived;
+
+/* Sole owner of Robot TCP, startup, recovery, and command execution. */
+	/* ==================== 通信资源对象 (底层与协议层) ==================== */
+	TransportChannel_t xChannel;          /* 传输层通道对象：抽象了底层的 TCP Socket 收发操作 */
+	TransportTcpContext_t xTransport;     /* TCP 上下文：存储 TCP 特有的运行时状态（Socket句柄、连接状态等） */
+	TransportTcpConfig_t xConfig;         /* TCP 配置参数：调用前由本任务填充（目标IP、端口、超时等），作为创建通道的输入 */
+	ModbusPort_t xPort;                   /* Modbus 协议端口：将 xChannel 包装为标准 Modbus 协议接口，供业务层调用 */
+	TcpClientSession_t xSession;          /* 客户端会话管理器：负责 TCP 连接的建立、保活心跳、异常断开与自动重连 */
+	Coffee3RobotSessionContext_t xSessionContext; /* 自定义上下文：将 xPort 和 xTransport 的指针打包，供会话层回调时逆向寻找通信对象 */
+
+	/* ==================== 业务数据对象 (指令与事务) ==================== */
+	Coffee3Command_t xCommand;            /* 当前指令：存放从消息队列(s_xRobotQueue)最新接收到的业务指令 */
+	Coffee3Command_t xDeferredCommand;    /* 暂存指令：当网络未就绪但收到指令时，先存于此，待网络恢复后优先执行 */
+	Coffee3RobotTransaction_t xTransaction; /* 事务状态机：记录当前正在执行的指令进度、恢复状态、超时时间等，跨时钟周期跟踪动作 */
+	Coffee3DobotCommand_t xResolvedCommand;/* 解析后的动作：将上层抽象的业务指令翻译成机械臂能懂的具体 Modbus 线圈/寄存器地址 */
+
+	/* ==================== 返回值与结果枚举 ==================== */
+	TransportResult_e xTransportResult;    /* 传输层结果：捕获底层 TCP 通道创建/操作的成功或失败原因 */
+	ModbusPortResult_e xResult;           /* Modbus 层结果：捕获协议交互（读写线圈、对账、启动）的执行结果 */
+	Coffee3RobotStartupOutcome_e xStartupOutcome; /* 启动结果：记录机械臂唤醒过程的业务级判定（成功/失败/需重试） */
+
+	/* ==================== 定时器与计数器 ==================== */
+	TickType_t xNextStartupRetryTick;     /* 下次启动重试节拍：记录下次允许尝试唤醒机械臂的系统时刻，用于失败后的退避延迟 */
+	TickType_t xNextHealthTick;           /* 下次健康检查节拍：记录下次发送心跳包探测机械臂存活的系统时刻 */
+	uint32_t ulStartupFailures;           /* 启动失败计数器：连续唤醒机械臂失败的次数，次数越多下次重试的延迟越长（指数退避） */
+
+	/* ==================== 状态机与流程控制标志 ==================== */
+	uint8_t ucCreated;                    /* 资源就绪标志：底层通信积木(xChannel/xPort等)是否成功初始化。为0则任务空转 */
+	uint8_t ucSessionReady;               /* 会话就绪标志：TCP已连接且机械臂处于可交互状态。为1时才允许下发业务指令 */
+	uint8_t ucDone;                       /* 对账完成标志：在恢复流程中，标识之前未完成的动作是否已在机械臂侧执行完毕 */
+	uint8_t ucWorkflowTransaction;        /* 事务来源标志：当前指令是否来自 Workflow。Workflow 指令通常需要更严格的恢复对账 */
+	uint8_t ucReconciledSession;          /* 已对账标志：防止在单次网络恢复期间，对同一个未完成的事务进行重复对账操作 */
+	uint8_t ucRecoveryWaitingLogged;       /* 恢复等待日志标志：确保在等待恢复期间，同一事务的“正在等待”日志只输出一次，防止刷屏 */
+	uint8_t ucDeferredCommand;            /* 暂存有效标志：为1时表示 xDeferredCommand 里有指令，需在网络恢复后优先处理 */
+	uint8_t ucSessionCommandPending;      /* 待执行命令标志：网络刚恢复且有暂存指令时置1，指示流程立即下发该指令 */
+	uint8_t ucWarmAttachLogged;           /* 热挂接日志标志：确保“机械臂热挂接成功”的日志只输出一次，直到会话断开重置 */
+	uint8_t ucActionTimedOut;             /* 动作超时标志：动作执行时间超过预期时置1，触发状态机进入对账或恢复流程 */
+	uint8_t ucLinkProbeAttempted;         /* 链路探测已试标志：在判断链路是否彻底丢失时，标识是否已主动发过探测包 */
+	uint8_t ucLinkConfirmed;              /* 链路断开确认标志：由链路探测函数填充，为1时表明网络确实断了，需断开连接并降级 */
+	
+	BaseType_t xCommandReceived;          /* 指令接收状态：标识当前要执行的指令是从队列新收到的，还是从暂存区取出的 */
+
 
 	(void)pvArgument;
 	(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
 		COFFEE3_LOG_SOURCE_ROBOT, "TASK_RUNNING:C3Robot", 0);
 	vAppTaskManagerWaitNetworkStackReady();
+	// 1. 调用方准备输入数据（填配置）
 	memset(&xConfig, 0, sizeof(xConfig));
 	xConfig.xMode = TRANSPORT_TCP_MODE_CLIENT;
 	memcpy(xConfig.aucRemoteIp, s_aucCoffee3RobotIp,
@@ -557,20 +673,23 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 	xConfig.usPort = COFFEE3_ROBOT_PORT;
 	xConfig.ulConnectTimeoutMs = COFFEE3_ROBOT_CONNECT_TIMEOUT_MS;
 	xConfig.ulIoTimeoutMs = COFFEE3_ROBOT_IO_TIMEOUT_MS;
+	// 2. 调用库函数，把配置变成实际对象
 	xTransportResult = xTransportTcpCreate(&xChannel, &xTransport,
 		"coffee3_robot_tcp", &xConfig);
 	ucCreated = 0U;
 	if (xTransportResult == TRANSPORT_RESULT_OK) {
+		xTransport.usReserveLocalPort = prvReserveRobotPort;
 		xResult = xModbusPortClientInit(&xPort, &xChannel,
 			MODBUS_PORT_TRANSPORT_TCP,
 			COFFEE3_ROBOT_IO_TIMEOUT_MS);
 		ucCreated = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
 	}
 	memset(&xSessionContext, 0, sizeof(xSessionContext));
+	// 手动打包上下文并传给会话初始化函数
 	if (ucCreated != 0U) {
-		xSessionContext.pxPort = &xPort;
-		xSessionContext.pxTransport = &xTransport;
-		if (xTcpClientSessionInit(&xSession,
+		xSessionContext.pxPort = &xPort; 			 // 把 xPort 的地址存进去
+		xSessionContext.pxTransport = &xTransport;  // 把 xTransport 的地址存进去
+		if (xTcpClientSessionInit(&xSession,		// 用通道和上下文初始化会话
 			&s_xCoffee3RobotSessionConfig, &xChannel,
 			&xSessionContext) != pdPASS) {
 			ucCreated = 0U;
@@ -612,9 +731,21 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 	ucDeferredCommand = 0U;
 	prvSetRobotReady(0U);
 	vCoffee3DeviceSetRecovering(COFFEE3_DEVICE_ROBOT, 0U);
+	vTaskDelay(pdMS_TO_TICKS(20000U)); // 等待服务器回收完资源再进入
 
 	for (;;) {
-		 xCommandReceived = pdFAIL;
+		if (s_ucRobotShutdownRequested != 0U) {
+			(void)xTransportClose(&xChannel);
+			prvSetRobotReady(0U);
+			s_ucRobotShutdownRequested = 0U;
+			s_ucRobotShutdownComplete = 1U;
+			(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_TCP_CLOSED_FOR_RESET", 0);
+			for (;;) {
+				vTaskDelay(pdMS_TO_TICKS(20U));
+			}
+		}
+		xCommandReceived = pdFAIL;
 		ucSessionCommandPending = 0U;
 		if ((xTransaction.ucActive != 0U) &&
 			(xTransaction.xRecoveryStart != 0U)) {
@@ -632,6 +763,22 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 			continue;
 		}
 		vTcpClientSessionProcess(&xSession);
+		/* Body controls have a TCP-only admission boundary, even before the
+		 * custom-program readiness probe or transaction recovery completes. */
+		if ((g_xCoffee3RobotTcpStatus.ucConnected != 0U) &&
+			(xQueuePeek(s_xRobotQueue, &xCommand, 0U) == pdPASS) &&
+			(xCommand.usAction >= COFFEE3_ACTION_ROBOT_START) &&
+			(xCommand.usAction <= COFFEE3_ACTION_ROBOT_MANUAL_MODE) &&
+			(xQueueReceive(s_xRobotQueue, &xCommand, 0U) == pdPASS)) {
+			vCoffee3DeviceCommandStarted(&xCommand);
+			xResult = prvExecute(&xPort, &xCommand, &xTransaction, &ucActionTimedOut);
+			vCoffee3DeviceCommandCompleted(&xCommand, (int32_t)xResult,
+				(xResult == MODBUS_PORT_RESULT_TIMEOUT) ? 1U : 0U);
+			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_ROBOT, (uint16_t)xCommand.ulOrderId,
+				"Robot body control completed", (int32_t)xResult,
+				"action", (int32_t)xCommand.usAction);
+		}
 		if (ucTcpClientSessionIsOnline(&xSession) == 0U) {
 			ucSessionReady = 0U;
 			ucReconciledSession = 0U;
@@ -1092,6 +1239,7 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 static ModbusPortResult_e prvRefresh(ModbusPort_t *pxPort,
 	uint32_t ulTimeoutMs)
 {
+	/* Refresh the controller snapshot before readiness and motion decisions. */
 	const DobotRobotProtocolConfig_t *pxProtocol;
 	ModbusPortResult_e xResult;
 	bool abBaseValues[DOBOT_ROBOT_BASE_INPUT_COUNT];
@@ -1135,12 +1283,20 @@ static int32_t prvRobotSessionProbe(void *pvOwnerContext,
 	uint32_t ulTimeoutMs)
 {
 	Coffee3RobotSessionContext_t *pxContext;
+	ModbusPortResult_e xResult;
 
 	pxContext = (Coffee3RobotSessionContext_t *)pvOwnerContext;
 	if ((pxContext == NULL) || (pxContext->pxPort == NULL)) {
 		return (int32_t)MODBUS_PORT_RESULT_INVALID_ARG;
 	}
-	return (int32_t)prvRefresh(pxContext->pxPort, ulTimeoutMs);
+	/* TCP reachability is independent of program RUNNING/3100 readiness. */
+	xResult = xModbusPortWriteCoil(pxContext->pxPort,
+		COFFEE3_ROBOT_UNIT_ID, 3100U, false, ulTimeoutMs);
+	s_ucFreshReadyReset = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
+	g_xCoffee3RobotData.aucControlCoils[0U] = 0U;
+	(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO, COFFEE3_LOG_SOURCE_ROBOT,
+		"Reconnect: clear 3100; wait for fresh program ready signal", (int32_t)xResult);
+	return (int32_t)xResult;
 }
 
 /*-----------------------------------------------------------*/
@@ -1179,6 +1335,7 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 	if ((xPreviousState == TCP_CLIENT_SESSION_CONNECTING) &&
 		(xCurrentState == TCP_CLIENT_SESSION_PROTOCOL_CHECK)) {
 		g_xCoffee3RobotTcpStatus.ucConnected = 1U;
+		s_ucFreshReadyReset = 0U;
 		g_xCoffee3RobotTcpStatus.ulConnectSuccessCount++;
 		prvSetRobotReady(0U);
 		prvLogRobotConnected(s_aucCoffee3RobotIp, COFFEE3_ROBOT_PORT,
@@ -1264,20 +1421,16 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 /*-----------------------------------------------------------*/
 static uint8_t prvRobotOperational(void)
 {
+	/* READY/IDLE are availability states; motion is authorized only when the
+	 * robot positively reports RUNNING, matching the physical safety rule. */
 	if ((g_xCoffee3RobotData.aucBaseInputs[
 		DOBOT_ROBOT_BODY_STATUS_ENABLED] == 0U) ||
 		(g_xCoffee3RobotData.aucBaseInputs[
 		DOBOT_ROBOT_BODY_STATUS_ALARM] != 0U)) {
 		return 0U;
 	}
-	if ((g_xCoffee3RobotData.aucControlCoils[0U] != 0U) ||
-		(g_xCoffee3RobotData.aucBaseInputs[
-			DOBOT_ROBOT_BODY_STATUS_RUNNING] != 0U) ||
-		(g_xCoffee3RobotData.aucBaseInputs[
-			DOBOT_ROBOT_BODY_STATUS_IDLE] != 0U)) {
-		return 1U;
-	}
-	return 0U;
+	return (g_xCoffee3RobotData.aucBaseInputs[
+		DOBOT_ROBOT_BODY_STATUS_RUNNING] != 0U) ? 1U : 0U;
 }
 
 /*-----------------------------------------------------------*/
@@ -1294,14 +1447,11 @@ static uint8_t prvRobotStrictReady(void)
 {
 	uint8_t ucReady;
 	uint8_t ucRunning;
-	uint8_t ucIdle;
 
 	ucReady = g_xCoffee3RobotData.aucControlCoils[0U];
 	ucRunning = g_xCoffee3RobotData.aucBaseInputs[
 		DOBOT_ROBOT_BODY_STATUS_RUNNING];
-	ucIdle = g_xCoffee3RobotData.aucBaseInputs[
-		DOBOT_ROBOT_BODY_STATUS_IDLE];
-	if ((ucReady == 0U) || ((ucRunning == 0U) && (ucIdle == 0U)) ||
+	if ((s_ucFreshReadyReset == 0U) || (ucReady == 0U) || (ucRunning == 0U) ||
 		(prvRobotOperational() == 0U)) {
 		return 0U;
 	}
@@ -1457,6 +1607,7 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	uint8_t ucRecoverySafe,
 	Coffee3RobotStartupOutcome_e *pxOutcome)
 {
+	/* Clear stale actions, clear alarms, enable, start, then require RUNNING. */
 	bool abBaseClear[10];
 	uint8_t ucIndex;
 	ModbusPortResult_e xResult;
@@ -1579,11 +1730,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 			DOBOT_ROBOT_BODY_STATUS_ENABLED] != 0U) &&
 			(g_xCoffee3RobotData.aucBaseInputs[
 			DOBOT_ROBOT_BODY_STATUS_ALARM] == 0U) &&
-			((g_xCoffee3RobotData.aucControlCoils[0U] != 0U) ||
 			(g_xCoffee3RobotData.aucBaseInputs[
-				DOBOT_ROBOT_BODY_STATUS_RUNNING] != 0U) ||
-			(g_xCoffee3RobotData.aucBaseInputs[
-				DOBOT_ROBOT_BODY_STATUS_IDLE] != 0U))) ? 1U : 0U;
+			DOBOT_ROBOT_BODY_STATUS_RUNNING] != 0U)) ? 1U : 0U;
 		if (ucOperational != 0U) {
 			break;
 		}
@@ -1619,6 +1767,7 @@ static ModbusPortResult_e prvReconcile(ModbusPort_t *pxPort,
 	Coffee3RobotTransaction_t *pxTransaction,
 	uint8_t *pucDone)
 {
+	/* Re-read command/result state after TCP loss to avoid duplicate motion. */
 	const DobotRobotProtocolConfig_t *pxProtocol;
 	uint32_t ulControlEnd;
 	uint8_t ucCommand;
@@ -1750,25 +1899,19 @@ static ModbusPortResult_e prvExecute(ModbusPort_t *pxPort,
 	if (pxCommand->usAction == COFFEE3_ACTION_REFRESH) {
 		return prvRefresh(pxPort, COFFEE3_ROBOT_IO_TIMEOUT_MS);
 	}
+	/* Body controls must work while the custom protocol program is stopped. */
+	if ((prvResolveCoffee3Dobot(pxCommand, &xResolvedCommand) != 0U) &&
+		(xResolvedCommand.xKind == COFFEE3_DOBOT_COMMAND_BODY)) {
+		return prvWriteRisingEdge(pxPort, xResolvedCommand.xBodyCommand,
+			COFFEE3_ROBOT_IO_TIMEOUT_MS);
+	}
 	xResult = prvRefresh(pxPort, COFFEE3_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
 	}
-	if (pxCommand->usAction ==
-		(uint16_t)COFFEE3_ACTION_ROBOT_START_SIGNAL) {
-		return prvWriteControlValue(pxPort,
-			DOBOT_ROBOT_P1_COMMAND_START_SIGNAL,
-			(pxCommand->ausParameter[0U] != 0U),
-			COFFEE3_ROBOT_IO_TIMEOUT_MS);
-	}
 	ucActionResolved = 0U;
 	if (prvResolveCoffee3Dobot(
 		pxCommand, &xResolvedCommand) != 0U) {
-		if (xResolvedCommand.xKind == COFFEE3_DOBOT_COMMAND_BODY) {
-			return prvWriteRisingEdge(pxPort,
-				xResolvedCommand.xBodyCommand,
-				COFFEE3_ROBOT_IO_TIMEOUT_MS);
-		}
 		if (xResolvedCommand.xKind == COFFEE3_DOBOT_COMMAND_ACTION) {
 			usCommandCoil = xResolvedCommand.usCommandCoil;
 			usResultCoil = xResolvedCommand.usResultCoil;
@@ -1785,6 +1928,10 @@ static ModbusPortResult_e prvExecute(ModbusPort_t *pxPort,
 		return MODBUS_PORT_RESULT_PROTOCOL;
 	}
 	if (ucActionResolved == 0U) {
+		if (pxCommand->usAction == COFFEE3_ACTION_ROBOT_START_SIGNAL) {
+			return prvWriteControlValue(pxPort, DOBOT_ROBOT_P1_COMMAND_START_SIGNAL,
+				(pxCommand->ausParameter[0U] != 0U), COFFEE3_ROBOT_IO_TIMEOUT_MS);
+		}
 		return MODBUS_PORT_RESULT_NOT_SUPPORTED;
 	}
 	if ((pxCommand->usAction == COFFEE3_ACTION_ROBOT_PUT_STORAGE) ||
@@ -1873,6 +2020,7 @@ static ModbusPortResult_e prvWriteRisingEdge(ModbusPort_t *pxPort,
 static ModbusPortResult_e prvAdvanceAction(ModbusPort_t *pxPort,
 	Coffee3RobotTransaction_t *pxTransaction, uint8_t *pucActionTimedOut)
 {
+	/* Advance WAIT_ACCEPT -> MOVING -> CLEAR_RESULT and verify completion. */
 	ModbusPortResult_e xResult;
 	bool bCommand;
 	bool bResult;
@@ -2025,7 +2173,7 @@ static ModbusPortResult_e prvAdvanceAction(ModbusPort_t *pxPort,
 static uint32_t prvRetryDelayMs(uint32_t ulFailures)
 {
 	static const uint32_t aulDelayMs[] = {
-		1000U, 2000U, 5000U, 10000U, 30000U
+		1000U, 2000U, 5000U, 10000U, COFFEE3_ROBOT_RETRY_MAX_MS
 	};
 	uint32_t ulIndex;
 
@@ -2036,3 +2184,10 @@ static uint32_t prvRetryDelayMs(uint32_t ulFailures)
 	}
 	return aulDelayMs[ulIndex];
 }
+
+
+
+
+
+
+

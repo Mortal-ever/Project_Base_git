@@ -114,9 +114,10 @@ static void prvUpdateNetworkIndicators(uint8_t ucNetworkReady);
 /*-----------------------------------------------------------*/
 AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 {
+	// 返回 AppTaskManagerResult_e 的值
 	// 早期启动日志消息，直接通过 USART1 输出，避免依赖日志模块。
 	static const uint8_t aucBootMessage[] =
-		"[0000INFO][BOOT:System] POWER_ON result=0\r\n";
+		"[0000INFO][BOOT:System] POWER_ON result=0\r\n"; 
 	static const uint8_t aucVersionMessage[] =
 		"[0000INFO][BOOT:System] " COFFEE3_DEVICE_VERSION_EVENT "\r\n";
 	static const uint8_t aucSerialFailMessage[] =
@@ -154,25 +155,25 @@ AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 		return APP_TASK_MANAGER_RESULT_ALREADY_CREATED;
 	}
 	
-	// 清零状态结构体，捕获复位原因，初始化传输和日志。
+	// 清零状态结构体
 	memset(&s_xStatus, 0, sizeof(s_xStatus));
+	// 捕获复位原因
 	s_xStatus.ulResetCause = prvCaptureResetCause();
+	// 初始化传输管理器和日志子系统。
 	vTransportManagerInit();
-	xLogSerialResult = xCoffee3LogSerialApplyDefault();
-	xLogResult = xCoffee3LogInitWithTransport(
-		(xLogSerialResult == HAL_OK) ? 1U : 0U);
+	xLogSerialResult = xCoffee3LogSerialApplyDefault(); // 配置 USART1 日志口
+	xLogResult = xCoffee3LogInitWithTransport((xLogSerialResult == HAL_OK) ? 1U : 0U);
 	if ((xLogResult != COFFEE3_LOG_RESULT_OK) &&
 		(xLogResult != COFFEE3_LOG_RESULT_ALREADY_INITIALIZED) &&
 		(g_xCoffee3LogStatus.ucBufferReady == 0U)) {
 		prvWriteRawStartupFailure(aucLogFailMessage,
-			(uint16_t)(sizeof(aucLogFailMessage) - 1U));
+			(uint16_t)(sizeof(aucLogFailMessage) - 1U)); // 初始化日志串口失败
 	}
 	s_xStatus.ucLogReady = 0U;
 	if (xCoffee3SerialApplyDefaults() != HAL_OK) {
 		prvWriteRawStartupFailure(aucSerialFailMessage,
 			(uint16_t)(sizeof(aucSerialFailMessage) - 1U));
-		s_xStatus.xStartResult =
-			APP_TASK_MANAGER_RESULT_SERIAL_INIT;
+		s_xStatus.xStartResult = APP_TASK_MANAGER_RESULT_SERIAL_INIT;
 		return s_xStatus.xStartResult;
 	}
 	if (xLogSerialResult != HAL_OK) {
@@ -302,11 +303,11 @@ AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 	for (ucBusIndex = 0U;(ucBusIndex < COFFEE3_RTU_BUS_COUNT) &&(xTaskResult == pdPASS);ucBusIndex++) {
 		pxBusConfig = pxCoffee3RtuBusGetConfig(ucBusIndex);  	/* 获取当前总线配置。 */
 		xTaskResult = prvCreateTaskLogged(vCoffee3RtuBusTask, 	/* 创建 BUS 任务。 */
-			pxBusConfig->pcName, COFFEE3_RTU_TASK_STACK,		
+			pxBusConfig->pcName, COFFEE3_RTU_TASK_STACK,		/* 传入总线名称和栈深度。 */
 			(void *)pxBusConfig, tskIDLE_PRIORITY + 2U,			/* 传入配置指针作为任务参数。 */
-			prvGetBusLogSource(ucBusIndex),
-			(APP_TASK_MASK_BUS2 << ucBusIndex),
-			apcBusTaskLog[ucBusIndex]);
+			prvGetBusLogSource(ucBusIndex),						/* 设置日志来源。 */
+			(APP_TASK_MASK_BUS2 << ucBusIndex),					/* 设置任务掩码。 */
+			apcBusTaskLog[ucBusIndex]);							/* 设置日志文本。 */
 	}
 	if (xTaskResult == pdPASS) {
 		xTaskResult = prvCreateTaskLogged(vCoffee3WorkflowTask,
@@ -549,8 +550,10 @@ static Coffee3LogSource_e prvGetBusLogSource(uint8_t ucBusIndex)
 		return COFFEE3_LOG_SOURCE_BUS3;
 	case 2U:
 		return COFFEE3_LOG_SOURCE_BUS4;
-	default:
+	case 3U:
 		return COFFEE3_LOG_SOURCE_BUS5;
+	default:  
+		return COFFEE3_LOG_SOURCE_SYSTEM;  /* 非法索引回落到系统来源 */
 	}
 }
 

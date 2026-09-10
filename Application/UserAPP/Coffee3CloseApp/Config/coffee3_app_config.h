@@ -46,14 +46,14 @@
 #define COFFEE3_ROBOT_IP_3                   1U
 #define COFFEE3_ROBOT_PORT                   502U
 #define COFFEE3_ROBOT_UNIT_ID                1U
-#define COFFEE3_ROBOT_CONNECT_TIMEOUT_MS     3000U
+#define COFFEE3_ROBOT_CONNECT_TIMEOUT_MS    3000U
 #define COFFEE3_ROBOT_IO_TIMEOUT_MS          1000U
 #define COFFEE3_ROBOT_LOOP_MS                20U
 #define COFFEE3_ROBOT_ACTION_POLL_MS        100U
 #define COFFEE3_ROBOT_ACCEPT_LOG_INTERVAL_MS 5000U
 #define COFFEE3_ROBOT_MOTION_TIMEOUT_MS     60000U
 #define COFFEE3_ROBOT_EDGE_LOW_MS           50U
-#define COFFEE3_ROBOT_RETRY_MAX_MS          30000U
+#define COFFEE3_ROBOT_RETRY_MAX_MS          20000U
 #define COFFEE3_ROBOT_READY_SAMPLES         3U
 
 /** @brief Select the validated Dobot product register contract. */

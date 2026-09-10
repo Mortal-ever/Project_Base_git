@@ -397,6 +397,7 @@ static TransportResult_e prvOpen(void *pvContext)
 static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext)
 {
 	err_t xError;
+	uint16_t usLocalPort;
 
 	if ((netif_default == NULL) || (netif_is_up(netif_default) == 0) ||
 		(netif_is_link_up(netif_default) == 0) ||
@@ -413,6 +414,16 @@ static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext)
 		return TRANSPORT_RESULT_NO_RESOURCE;
 	}
 
+	if (pxContext->usReserveLocalPort != NULL) {
+		usLocalPort = pxContext->usReserveLocalPort();
+		xError = (usLocalPort == 0U) ? ERR_VAL :
+			netconn_bind(pxContext->pxConnection, IP_ADDR_ANY, usLocalPort);
+		if (xError != ERR_OK) {
+			pxContext->lLastNativeError = (int32_t)xError;
+			prvCloseConnection(pxContext);
+			return prvMapLwipError(xError);
+		}
+	}
 	netconn_set_recvtimeout(pxContext->pxConnection,
 		pxContext->xConfig.ulIoTimeoutMs);
 	netconn_set_sendtimeout(pxContext->pxConnection,

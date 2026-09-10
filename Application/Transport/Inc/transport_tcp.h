@@ -45,6 +45,7 @@ typedef struct {
 	struct netconn *pxConnection; /*!< Connected or accepted Netconn. */
 	struct netbuf *pxRxBuffer; /*!< Partly consumed receive buffer. */
 	uint16_t usRxOffset; /*!< Read cursor inside pxRxBuffer. */
+	uint16_t (*usReserveLocalPort)(void); /*!< Optional owner hook; persist before connect. Zero means failure. */
 	volatile TransportState_e xState; /*!< Backend lifecycle state. */
 	volatile int32_t lLastNativeError; /*!< Latest LwIP err_t value. */
 	volatile err_t xConnectCheckResult;

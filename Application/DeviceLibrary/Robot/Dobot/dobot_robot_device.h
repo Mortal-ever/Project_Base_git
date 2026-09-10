@@ -32,7 +32,7 @@ typedef enum {
 	DOBOT_ROBOT_PROTOCOL_3 = 2
 } DobotRobotProtocolVariant_e;
 
-/** @brief Protocol 1 command and result coils from the reviewed workbook. */
+/**`r`n  * @brief  Define Protocol 1 motion command/result handshakes.`r`n  *`r`n  * Each motion command coil is consumed by the Robot controller. Its paired`r`n  * result coil becomes high when the motion finishes and is cleared by the`r`n  * product owner before the next motion is issued.`r`n  */
 typedef enum {
 	DOBOT_ROBOT_P1_RESULT_READY = 3100,
 	DOBOT_ROBOT_P1_RESULT_HOME = 3101,
@@ -190,3 +190,4 @@ uint8_t ucDobotRobotResolvePoint(
 #endif
 
 #endif /* DOBOT_ROBOT_DEVICE_H */
+
