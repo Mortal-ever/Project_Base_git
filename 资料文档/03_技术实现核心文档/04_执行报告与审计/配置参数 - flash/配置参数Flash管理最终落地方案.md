@@ -38,7 +38,7 @@
 ```c
 typedef struct {
     uint32_t storage_enabled_mask; /* 默认0x03：开放存储位1、2 */
-} Coffee3ConfigV1;
+} Coffee3Config_t;
 ```
 
 上位机参数含义：

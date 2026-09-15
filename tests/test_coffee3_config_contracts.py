@@ -34,6 +34,31 @@ class ConfigContracts(unittest.TestCase):
                         commit.index('memcpy('))
         self.assertIn('Command rejected: address=%u value=%u; %s', server)
 
+    def test_final_approved_host_writes(self):
+        server = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
+        validator = body(server,
+            'static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,\n\tuint8_t ucOrderPadding)')
+        self.assertIn('case 0x001FU:', validator)
+        for name in ('COFFEE3_REG_WATER_VALVE_DEBUG',
+                     'COFFEE3_REG_UV_LAMP', 'COFFEE3_REG_STORAGE_SELECTOR',
+                     'COFFEE3_REG_HOT_CUP_HEIGHT_OFFSET',
+                     'COFFEE3_REG_COLD_CUP_HEIGHT_OFFSET',
+                     'COFFEE3_REG_ROBOT_TYPE',
+                     'COFFEE3_REG_COFFEE_WATER_PUMP',
+                     'COFFEE3_REG_COFFEE_PICKUP_TIME',
+                     'COFFEE3_REG_AUXILIARY_TANK_PUMP',
+                     'COFFEE3_REG_COFFEE_MACHINE_TYPE',
+                     'COFFEE3_REG_ICE_COEFFICIENT',
+                     'COFFEE3_REG_ICE_MACHINE_TYPE'):
+            self.assertIn('case ' + name + ':', validator)
+        self.assertTrue({0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF}.issubset(
+            {int(x, 16) for x in re.findall(r'case 0x([0-9A-F]+)U:', validator)}))
+        self.assertIn('case 0x0023U:', validator)
+        self.assertNotIn('storage selector is read-only', server)
+        self.assertNotIn('(usAddress <= 0x0032U) && (ulEndAddress > 0x0032U)', server)
+        self.assertIn('COFFEE3_LOCAL_DO_COFFEE_WATER_PUMP', server)
+        self.assertIn('Coffee water pump debug accepted', server)
+
     def test_single_outlet_manual_and_protocol(self):
         server = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
         code = body(server,
@@ -70,11 +95,28 @@ class ConfigContracts(unittest.TestCase):
     def test_full_mask_and_same_value(self):
         code = read(APP / 'Config/coffee3_config.c')
         self.assertIn('aulWords[1] <= 0xFFFFUL', code)
-        self.assertIn('xCoffee3ConfigSetStorageMask(0x0003U)', code)
+        self.assertIn('s_xConfig.ulStorageEnabledMask = 0x0003U', code)
         self.assertIn('s_xConfig.ulStorageEnabledMask == usMask', code)
-        self.assertIn('aulWords[1] = usMask;', code)
+        self.assertIn('xNext.ulStorageEnabledMask = usMask;', code)
         self.assertIn('vTaskSuspendAll()', code)
         self.assertIn('ucAppOtaFlashIsActive()', code)
+
+    def test_single_config_structure_and_fruit_coefficients(self):
+        header = read(APP / 'Config/coffee3_config.h')
+        code = read(APP / 'Config/coffee3_config.c')
+        workflow = read(APP / 'WorkFlow/coffee3_workflow.c')
+        self.assertEqual(header.count('} Coffee3Config_t;'), 1)
+        self.assertIn('#define COFFEE3_CONFIG_MARK', header)
+        self.assertNotIn('CONFIG_V1_MARK', header + code)
+        self.assertNotIn('CONFIG_V2', header + code)
+        self.assertIn('aulFruitCoefficient[COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT]', header)
+        self.assertIn('COFFEE3_CONFIG_FRUIT_COEFFICIENT_DEFAULT 100U', header)
+        self.assertIn('COFFEE3_CONFIG_FRUIT_COEFFICIENT_MIN 10U', header)
+        self.assertIn('COFFEE3_CONFIG_FRUIT_COEFFICIENT_MAX 1000U', header)
+        self.assertIn('xCoffee3ConfigSetFruitCoefficients(', code)
+        self.assertIn('xConfigStoreWrite(aulWords, COFFEE3_CONFIG_WORD_COUNT)', code)
+        self.assertIn('usCoffee3ConfigFruitCoefficient(ucChannel)', workflow)
+        self.assertNotIn('COFFEE3_FRUIT_MILK_MS_PER_ML', workflow)
 
     def test_persist_before_register_publication(self):
         code = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
@@ -106,10 +148,16 @@ class ConfigContracts(unittest.TestCase):
     def test_build_scope(self):
         project = ET.parse(ROOT / 'MDK-ARM/STM32F407_Base.uvprojx')
         for target in project.findall('.//Targets/Target'):
-            files = [f.text for f in target.findall('./Groups/Group/Files/File/FileName')]
-            expected = 1 if target.findtext('TargetName') == 'Coffee3Close' else 0
-            self.assertEqual(files.count('config_store.c'), expected)
-            self.assertEqual(files.count('coffee3_config.c'), expected)
+            files = []
+            for group in target.findall('./Groups/Group'):
+                include = group.findtext('./GroupOption/CommonProperty/IncludeInBuild')
+                if include == '0':
+                    continue
+                files.extend(f.text for f in
+                    group.findall('./Files/File/FileName'))
+            private_expected = 1 if target.findtext('TargetName') == 'Coffee3Close' else 0
+            self.assertEqual(files.count('config_store.c'), 1)
+            self.assertEqual(files.count('coffee3_config.c'), private_expected)
         cmake = read(ROOT / 'Application/CMakeLists.txt')
         self.assertIn('Common/ConfigStore/config_store.c', cmake)
         self.assertIn('${COFFEE3_APP_ROOT}/Config/coffee3_config.c', cmake)

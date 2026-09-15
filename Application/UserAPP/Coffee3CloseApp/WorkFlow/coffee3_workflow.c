@@ -2258,7 +2258,8 @@ static int32_t prvRunFruit(uint8_t ucChannel, uint16_t usAmountMl,
 	}
 	if (lResult == 0) {
 		ulRunMs = (ucClean != 0U) ? COFFEE3_FRUIT_MILK_CLEAN_MS :
-			((uint32_t)usAmountMl * COFFEE3_FRUIT_MILK_MS_PER_ML);
+			((uint32_t)usAmountMl *
+			usCoffee3ConfigFruitCoefficient(ucChannel));
 		prvDelayWithServices(ulRunMs);
 		if (g_xCoffee3WorkflowStatus.ucCancelRequested != 0U) {
 			lResult = COFFEE3_WORKFLOW_ERROR_CANCELED;

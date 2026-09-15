@@ -1,5 +1,8 @@
 | Date | File | Action | Description |
 | --- | --- | --- | --- |
+| 2026-09-15 | Coffee3CloseApp/Config/coffee3_config.c/.h; Modbus_Tcp_Server/coffee3_server.c/.h; WorkFlow/coffee3_workflow.c; tests/test_coffee3_config_contracts.py; 上位机写入拒绝地址清单文档 | Modify | 落实最终审批：唯一Coffee3Config_t及COFFEE3_CONFIG_MARK扩展六路果乳系数；0x0032改为可读写；0x0041直控DO4；0x003F全16位兼容；开放已审批兼容地址并补清晰日志。GCC及Keil Coffee3Close构建通过，未烧录。 |
+| 2026-09-15 | Coffee3Close上位机写入拒绝地址审批清单.md; Coffee3Close地址0x0023水桶位兼容调研报告.md | Add/Update | 按业务批复将0x0023的自动及1-4号水桶位全部列为待开放；整理Coffee3当前功能地址、保留区、值域、只读区及运行时拒绝清单供审批。未改固件。 |
+| 2026-09-15 | Coffee3Close地址0x0023水桶位兼容调研报告.md | Add | 核对日志、上位机协议、Coffee1选桶实现、Coffee3 X4及单水桶物理边界；确认0x0023未进入Coffee3写白名单，提出0/1兼容与X4安全门控方案。本轮仅调研，未改固件。 |
 | 2026-09-15 | Coffee3CloseApp/Robot_Tcp; Device/coffee3_device.c; WorkFlow; Modbus_Tcp_Server/coffee3_server.c; Config/coffee3_app_config.h; tests/test_coffee3_robot_execution.py | Fix | 延用机器人状态机，保留接取及完成证据、重连先复核、发布前最多5次额外重试且间隔3秒；单槽调试等待完整业务释放，忙时返回异常04；新增19项实际ARM函数仿真测试。未烧录，完整回归仍有既有配置清单测试失败，详见实施报告。 |
 | 2026-09-14 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; WorkFlow/coffee3_workflow.c/.h; Coffee3上位机指令支持清单与门调试反馈.md | Fix | Coffee3写入使用明确支持清单，未实现指令打印F123拒绝原因并返回异常；接入146开关门及157停止，复用Workflow门控与5秒超时，补足执行日志。 |
 | 2026-09-11 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; Coffee2OpenApp/Robot_Tcp/coffee2_robot_tcp.c; Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c; tests/test_coffee3_config_contracts.py; 机器人出餐选位写回与启动重试修正.md | Fix | 撤销0x0033只读错误，支持FC06/FC16写回与FC03读回，独立确认写不触发订单；双Target本体1～8置1前先写0，TCP连接启动未就绪时每轮失败后3秒重试，就绪后结束本次连接重试。 |
@@ -915,3 +918,8 @@
 - Modified Transport/Inc/transport_tcp.h and Transport/Src/transport_tcp.c: optional product-owned persistent local-port reservation and explicit bind; NULL keeps legacy behavior.
 - Modified Common/TcpClientSession/tcp_client_session.h: document session-handshake probe semantics.
 - Reserved VG Flash sectors 10/11 for Coffee3 append-only port journal, outside application/OTA; added Coffee3机器人本体边界与重连端口持久化.md with scope, partition evidence and bench acceptance.
+## 2026-09-15 Coffee3Close上位机写入拒绝地址二次审查
+
+- 新增 `Coffee3Close上位机写入拒绝地址清单二次审查版.md`，吸收首轮审批意见。
+- 重新核对 Coffee1 对 `0x0041`、`0x0043`、`0x00AA~0x00AF` 的真实实现，区分实际执行、配置保存、兼容接收和明确拒绝。
+- 本轮仅更新审查文档，未修改固件源码或工程配置。

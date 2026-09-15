@@ -149,6 +149,8 @@ static void prvEvaluateOrder(void);
   */
 static void prvEvaluateManualCommands(uint16_t usAddress,
 	uint16_t usQuantity);
+static void prvLogCompatibilityWrites(uint16_t usAddress,
+	uint16_t usQuantity, const uint16_t *pusRegisters);
 static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 	uint16_t usValue);
 static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
@@ -208,12 +210,19 @@ static void prvUpdateActiveClientCount(void);
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee3ServerInitialize(void)
 {
+	uint8_t ucIndex;
+
 	memset(&g_xCoffee3ServerStatus, 0,
 		sizeof(g_xCoffee3ServerStatus));
 	memset(s_ausCommandRegisters, 0,
 		sizeof(s_ausCommandRegisters));
 	s_ausCommandRegisters[COFFEE3_CONFIG_STORAGE_REGISTER] =
 		usCoffee3ConfigStorageMask();
+	for (ucIndex = 0U; ucIndex < COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT;
+		ucIndex++) {
+		s_ausCommandRegisters[COFFEE3_REG_FRUIT_COEFFICIENT_FIRST +
+			ucIndex] = usCoffee3ConfigFruitCoefficient(ucIndex + 1U);
+	}
 	memset(s_ausStatusRegisters, 0,
 		sizeof(s_ausStatusRegisters));
 	memset(s_ausUpgradeRegisters, 0,
@@ -874,14 +883,36 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 		return NMBS_ERROR_NONE;
 	}
 	switch (usAddress) {
-	case 0x001AU: case 0x0021U: case 0x0022U: case 0x0033U:
+	case 0x001AU: case 0x001FU:
+	case 0x0021U: case 0x0022U:
+	case COFFEE3_REG_WATER_VALVE_DEBUG: case COFFEE3_REG_UV_LAMP:
+	case COFFEE3_REG_PRINTER_STATUS:
+	case COFFEE3_REG_STORAGE_SELECTOR: case 0x0033U:
+	case COFFEE3_REG_HOT_CUP_HEIGHT_OFFSET:
+	case COFFEE3_REG_COLD_CUP_HEIGHT_OFFSET:
+	case COFFEE3_REG_ROBOT_TYPE:
+	case COFFEE3_REG_COFFEE_WATER_PUMP:
+	case COFFEE3_REG_COFFEE_PICKUP_TIME:
+	case COFFEE3_REG_AUXILIARY_TANK_PUMP:
+	case COFFEE3_REG_COFFEE_MACHINE_TYPE:
 	case 0x0047U: case 0x0061U: case 0x0062U: case 0x0063U:
 	case 0x0070U: case 0x0071U:
+	case COFFEE3_REG_ICE_COEFFICIENT:
+	case COFFEE3_REG_ICE_MACHINE_TYPE:
 	case 0x0080U: case 0x0081U: case 0x0082U: case 0x0083U:
 	case 0x00A2U: case 0x00A3U: case 0x00A4U:
+	case 0x00AAU: case 0x00ABU: case 0x00ACU:
+	case 0x00ADU: case 0x00AEU: case 0x00AFU:
 	case 0x0200U: case 0x0201U: case 0x0202U:
 	case 0x0208U: case 0x0209U:
 		return NMBS_ERROR_NONE;
+	case 0x0023U:
+		if ((usValue == 0U) || (usValue == 0x0001U) ||
+			(usValue == 0x0010U) || (usValue == 0x0100U) ||
+			(usValue == 0x1000U)) {
+			return NMBS_ERROR_NONE;
+		}
+		break;
 	case 0x0030U:
 		if (usValue <= 9U) { return NMBS_ERROR_NONE; }
 		break;
@@ -922,8 +953,6 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 			pcReason = "outlet fan is not supported";
 		} else if (usAddress == 0x0094U) {
 			pcReason = "outlet light is not supported";
-		} else if (usAddress == 0x0032U) {
-			pcReason = "storage selector is read-only";
 		}
 		return prvRejectCommand(usAddress, usValue, pcReason,
 			NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
@@ -936,7 +965,10 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
 	uint32_t ulEndAddress;
+	uint16_t ausFruitCoefficients[COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT];
+	uint16_t usCoefficient;
 	uint16_t usIndex;
+	uint8_t ucCoefficientIndex;
 	uint8_t ucRobotMotionAccepted;
 	nmbs_error xValidation;
 
@@ -1025,10 +1057,6 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 	s_ucOtaRejectLogged = 0U;
 	if (((uint32_t)usAddress + usQuantity) <=
 		COFFEE3_SERVER_COMMAND_COUNT) {
-		/* Keep storage selection protected; outlet selection accepts write-back. */
-		if ((usAddress <= 0x0032U) && (ulEndAddress > 0x0032U)) {
-			return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
-		}
 		/* Persist before publishing registers or dispatching this request. */
 		if ((usAddress <= COFFEE3_CONFIG_STORAGE_REGISTER) &&
 			(ulEndAddress > COFFEE3_CONFIG_STORAGE_REGISTER)) {
@@ -1037,9 +1065,68 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
 			}
 		}
+		if ((usAddress <= COFFEE3_REG_FRUIT_COEFFICIENT_LAST) &&
+			(ulEndAddress > COFFEE3_REG_FRUIT_COEFFICIENT_FIRST)) {
+			for (ucCoefficientIndex = 0U;
+				ucCoefficientIndex < COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT;
+				ucCoefficientIndex++) {
+				ausFruitCoefficients[ucCoefficientIndex] =
+					usCoffee3ConfigFruitCoefficient(
+						ucCoefficientIndex + 1U);
+			}
+			for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
+				uint16_t usCurrentAddress;
+
+				usCurrentAddress = (uint16_t)(usAddress + usIndex);
+				if ((usCurrentAddress >=
+					COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
+					(usCurrentAddress <=
+					COFFEE3_REG_FRUIT_COEFFICIENT_LAST)) {
+					usCoefficient = pusRegisters[usIndex];
+					if (usCoefficient <
+						COFFEE3_CONFIG_FRUIT_COEFFICIENT_MIN) {
+						usCoefficient =
+							COFFEE3_CONFIG_FRUIT_COEFFICIENT_MIN;
+					} else if (usCoefficient >
+						COFFEE3_CONFIG_FRUIT_COEFFICIENT_MAX) {
+						usCoefficient =
+							COFFEE3_CONFIG_FRUIT_COEFFICIENT_MAX;
+					}
+					ausFruitCoefficients[usCurrentAddress -
+						COFFEE3_REG_FRUIT_COEFFICIENT_FIRST] =
+						usCoefficient;
+				}
+			}
+			if (xCoffee3ConfigSetFruitCoefficients(
+				ausFruitCoefficients) != CONFIG_STORE_OK) {
+				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+			}
+		}
+		if ((usAddress <= COFFEE3_REG_COFFEE_WATER_PUMP) &&
+			(ulEndAddress > COFFEE3_REG_COFFEE_WATER_PUMP)) {
+			usIndex = (uint16_t)(COFFEE3_REG_COFFEE_WATER_PUMP -
+				usAddress);
+			if (ucCoffee3IoSetLocalOutput(
+				COFFEE3_LOCAL_DO_COFFEE_WATER_PUMP,
+				(uint8_t)(pusRegisters[usIndex] & 0x0001U)) == 0U) {
+				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+			}
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+				"Coffee water pump debug accepted: address=65 value=%u DO4=%u",
+				(unsigned int)pusRegisters[usIndex],
+				(unsigned int)(pusRegisters[usIndex] & 0x0001U));
+		}
 		taskENTER_CRITICAL();
 		memcpy(&s_ausCommandRegisters[usAddress], pusRegisters,
 			(size_t)usQuantity * sizeof(uint16_t));
+		for (ucCoefficientIndex = 0U;
+			ucCoefficientIndex < COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT;
+			ucCoefficientIndex++) {
+			s_ausCommandRegisters[COFFEE3_REG_FRUIT_COEFFICIENT_FIRST +
+				ucCoefficientIndex] = usCoffee3ConfigFruitCoefficient(
+					ucCoefficientIndex + 1U);
+		}
 		if (ucRobotMotionAccepted != 0U) {
 			s_ausCommandRegisters[0x0031U] = 0U;
 		}
@@ -1048,9 +1135,14 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		if ((usAddress <= COFFEE3_REG_SYRUP_4) ||
 			(usAddress > COFFEE3_CONFIG_STORAGE_REGISTER) ||
 			(ulEndAddress <= COFFEE3_CONFIG_STORAGE_REGISTER)) {
-			prvEvaluateOrder();
+			if (!((usAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
+				(ulEndAddress <=
+					(uint32_t)COFFEE3_REG_FRUIT_COEFFICIENT_LAST + 1U))) {
+				prvEvaluateOrder();
+			}
 		}
 		prvEvaluateManualCommands(usAddress, usQuantity);
+		prvLogCompatibilityWrites(usAddress, usQuantity, pusRegisters);
 		return NMBS_ERROR_NONE;
 	}
 	return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
@@ -1432,6 +1524,95 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 		(xCoffee3WorkflowSubmitMaintenance(
 			COFFEE3_MAINTENANCE_FRUIT_CLEAN, 2U, 0U) == pdPASS)) {
 		s_ausCommandRegisters[COFFEE3_REG_FRUIT_B_CLEAN] = 0U;
+	}
+}
+
+/*-----------------------------------------------------------*/
+static void prvLogCompatibilityWrites(uint16_t usAddress,
+	uint16_t usQuantity, const uint16_t *pusRegisters)
+{
+	uint16_t usCurrentAddress;
+	uint16_t usIndex;
+	uint16_t usValue;
+	const char *pcReason;
+
+	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
+		usCurrentAddress = (uint16_t)(usAddress + usIndex);
+		usValue = s_ausCommandRegisters[usCurrentAddress];
+		pcReason = NULL;
+		switch (usCurrentAddress) {
+		case 0x001FU:
+			pcReason = "Coffee3Close target remains fixed";
+			break;
+		case COFFEE3_REG_WATER_BUCKET_ENABLE:
+			pcReason = "bucket mask accepted; only bucket 1 is installed";
+			break;
+		case COFFEE3_REG_WATER_VALVE_DEBUG:
+			pcReason = "Coffee1 water-valve group is not installed";
+			break;
+		case COFFEE3_REG_UV_LAMP:
+			pcReason = "UV lamp is not installed";
+			break;
+		case COFFEE3_REG_PRINTER_STATUS:
+			pcReason = "printer is not installed";
+			break;
+		case COFFEE3_REG_STORAGE_SELECTOR:
+			pcReason = "read/write storage selector updated";
+			break;
+		case COFFEE3_REG_HOT_CUP_HEIGHT_OFFSET:
+			pcReason = "hot-cup height offset is not applied";
+			break;
+		case COFFEE3_REG_COLD_CUP_HEIGHT_OFFSET:
+			pcReason = "cold-cup height offset is not applied";
+			break;
+		case COFFEE3_REG_ROBOT_TYPE:
+			pcReason = "robot driver remains fixed to Dobot";
+			break;
+		case COFFEE3_REG_COFFEE_PICKUP_TIME:
+			pcReason = "pickup-time parameter is not implemented";
+			break;
+		case COFFEE3_REG_AUXILIARY_TANK_PUMP:
+			pcReason = "auxiliary tank pump is not installed";
+			break;
+		case COFFEE3_REG_COFFEE_MACHINE_TYPE:
+			pcReason = "coffee machine remains fixed to M50";
+			break;
+		case COFFEE3_REG_ICE_COEFFICIENT:
+			pcReason = "ice coefficient is accepted but not applied";
+			break;
+		case COFFEE3_REG_ICE_MACHINE_TYPE:
+			pcReason = "ice-machine driver remains fixed";
+			break;
+		default:
+			break;
+		}
+		if (pcReason != NULL) {
+			if ((usCurrentAddress == COFFEE3_REG_WATER_BUCKET_ENABLE) ||
+				(usCurrentAddress == COFFEE3_REG_STORAGE_SELECTOR)) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+					"Command accepted: address=%u value=%u; %s",
+					(unsigned int)usCurrentAddress,
+					(unsigned int)usValue, pcReason);
+			} else {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+					"Command accepted without product action: address=%u value=%u; %s",
+					(unsigned int)usCurrentAddress,
+					(unsigned int)usValue, pcReason);
+			}
+		}
+		if ((usCurrentAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
+			(usCurrentAddress <= COFFEE3_REG_FRUIT_COEFFICIENT_LAST)) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+				"Fruit coefficient saved: channel=%u requested=%u effective=%u installed=%u",
+				(unsigned int)(usCurrentAddress -
+					COFFEE3_REG_FRUIT_COEFFICIENT_FIRST + 1U),
+				(unsigned int)pusRegisters[usIndex],
+				(unsigned int)usValue,
+				(unsigned int)((usCurrentAddress <= 0x00ABU) ? 1U : 0U));
+		}
 	}
 }
 
