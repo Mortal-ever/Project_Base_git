@@ -123,11 +123,11 @@ static uint8_t s_ucInitializationAcknowledged;
 COFFEE3_CCM_DATA
 static uint8_t s_ucInitializationComplete;
 static uint8_t s_ucResidualState;
-static uint8_t s_ucHomeComplete;
+// static uint8_t s_ucHomeComplete;
 static uint8_t s_ucDoorInitStarted;
 static uint8_t s_ucDoorExpectedLimit;
 static Coffee3Command_t s_xInitHome;
-static TickType_t s_xInitRetryTick;
+// static TickType_t s_xInitRetryTick;
 static uint16_t s_usLastReadyMask;
 static uint8_t s_ucLastBaseReady;
 
@@ -867,11 +867,11 @@ BaseType_t xCoffee3WorkflowInitialize(void)
 	s_ucInitializationAcknowledged = 0U;
 	s_ucInitializationComplete = 0U;
 	s_ucResidualState = 0U;
-	s_ucHomeComplete = 0U;
+	// s_ucHomeComplete = 0U;
 	s_ucDoorInitStarted = 0U;
 	s_ucDoorExpectedLimit = 1U;
 	memset(&s_xInitHome, 0, sizeof(s_xInitHome));
-	s_xInitRetryTick = 0U;
+	// s_xInitRetryTick = 0U;
 	s_usLastReadyMask = 0U;
 	s_ucLastBaseReady = 0U;
 	g_xCoffee3WorkflowStatus.xMachineState =
