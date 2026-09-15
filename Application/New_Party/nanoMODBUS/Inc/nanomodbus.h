@@ -76,7 +76,7 @@ typedef enum nmbs_error {
 
 
 /**
- * Return whether the nmbs_error is a modbus exception
+ * Return whether the nmbs_error is a modbus exception异常
  * @e nmbs_error to check
  */
 #define nmbs_error_is_exception(e) ((e) > 0 && (e) < 5)
@@ -85,7 +85,7 @@ typedef enum nmbs_error {
 #define NMBS_BITFIELD_MAX 2000
 #endif
 
-/* check coil count divisible by 8 */
+/* check coil线圈 count divisible整除 by 8 */
 #if ((NMBS_BITFIELD_MAX & 7) > 0)
 #error "NMBS_BITFIELD_MAX must be divisible by 8"
 #endif
@@ -93,7 +93,7 @@ typedef enum nmbs_error {
 #define NMBS_BITFIELD_BYTES_MAX (NMBS_BITFIELD_MAX / 8)
 
 /**
- * Bitfield consisting of 2000 coils/discrete inputs
+ * (一个由……组成的位域 Bitfield consisting of 2000 coils/discrete离散 inputs
  */
 typedef uint8_t nmbs_bitfield[NMBS_BITFIELD_BYTES_MAX];
 
@@ -103,26 +103,26 @@ typedef uint8_t nmbs_bitfield[NMBS_BITFIELD_BYTES_MAX];
 typedef uint8_t nmbs_bitfield_256[32];
 
 /**
- * Read a bit from the nmbs_bitfield bf at position b
+ * Read a bit from the nmbs_bitfield bf at position b (读取某一 bit)
  */
 #define nmbs_bitfield_read(bf, b) ((bool) ((bf)[(b) >> 3] & (0x1 << ((b) & (8 - 1)))))
 
 /**
- * Set a bit of the nmbs_bitfield bf at position b
+ * Set a bit of the nmbs_bitfield bf at position b (把某一 bit 设置为 1)
  */
 #define nmbs_bitfield_set(bf, b) (((bf)[(b) >> 3]) = (((bf)[(b) >> 3]) | (0x1 << ((b) & (8 - 1)))))
 
 /**
- * Reset a bit of the nmbs_bitfield bf at position b
+ * Reset a bit of the nmbs_bitfield bf at position b (把某一个 bit 清成 0)
  */
 #define nmbs_bitfield_unset(bf, b) (((bf)[(b) >> 3]) = (((bf)[(b) >> 3]) & ~(0x1 << ((b) & (8 - 1)))))
 
 /**
- * Write value v to the nmbs_bitfield bf at position b
+ * Write value v to the nmbs_bitfield bf at position b (把某 bit 写成指定值)
  */
 #define nmbs_bitfield_write(bf, b, v) ((bf)[(b) >> 3] = ((bf)[(b) >> 3] & ~(1 << ((b) & 7))) | ((v) << ((b) & 7)))
 /**
- * Reset (zero) the whole bitfield
+ * Reset (zero) the whole bitfield (清空整个 bitfield)
  */
 #define nmbs_bitfield_reset(bf) memset(bf, 0, sizeof(bf))
 
@@ -139,13 +139,15 @@ typedef enum nmbs_transport {
  * nanoMODBUS platform configuration struct.
  * Passed to nmbs_server_create() and nmbs_client_create().
  *
- * read() and write() are the platform-specific methods that read/write data to/from a serial port or a TCP connection.
- *
+ * read() and write() are the platform-specific methods that用于 read/write data to/from从 a serial port or a TCP connection.
+ * read() 和 write() 是平台特定的方法，用于从串行端口或 TCP 连接读取/写入数据
+ * 
  * Both methods should block until either:
- * - `count` bytes of data are read/written
+ * - `count` bytes of data are read/written 
+ * - 已读/写 | `count` 字节的 | 数据 
  * - the byte timeout, with `byte_timeout_ms >= 0`, expires
  *
- * A value `< 0` for `byte_timeout_ms` means infinite timeout.
+ * A value `< 0` for `byte_timeout_ms` means infinite无限 timeout.
  * With a value `== 0` for `byte_timeout_ms`, the method should read/write once in a non-blocking fashion and return immediately.
  *
  *

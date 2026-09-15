@@ -1,5 +1,16 @@
 | Date | File | Action | Description |
 | --- | --- | --- | --- |
+| 2026-09-15 | Coffee3CloseApp/Robot_Tcp; Device/coffee3_device.c; WorkFlow; Modbus_Tcp_Server/coffee3_server.c; Config/coffee3_app_config.h; tests/test_coffee3_robot_execution.py | Fix | 延用机器人状态机，保留接取及完成证据、重连先复核、发布前最多5次额外重试且间隔3秒；单槽调试等待完整业务释放，忙时返回异常04；新增19项实际ARM函数仿真测试。未烧录，完整回归仍有既有配置清单测试失败，详见实施报告。 |
+| 2026-09-14 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; WorkFlow/coffee3_workflow.c/.h; Coffee3上位机指令支持清单与门调试反馈.md | Fix | Coffee3写入使用明确支持清单，未实现指令打印F123拒绝原因并返回异常；接入146开关门及157停止，复用Workflow门控与5秒超时，补足执行日志。 |
+| 2026-09-11 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c; Coffee2OpenApp/Robot_Tcp/coffee2_robot_tcp.c; Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c; tests/test_coffee3_config_contracts.py; 机器人出餐选位写回与启动重试修正.md | Fix | 撤销0x0033只读错误，支持FC06/FC16写回与FC03读回，独立确认写不触发订单；双Target本体1～8置1前先写0，TCP连接启动未就绪时每轮失败后3秒重试，就绪后结束本次连接重试。 |
+| 2026-09-11 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c/.h; Robot_Tcp/coffee3_robot_tcp.c; tests/test_coffee3_config_contracts.py | Fix | 对齐Coffee1已验证的手动放出餐确认顺序：3138前同步发布0x000A=1与0x0033=1，并增加路由发布日志；保留协议1旧版3128完成确认。 |
+| 2026-09-11 | Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c/.h; Robot_Tcp/coffee3_robot_tcp.c; tests/test_coffee3_config_contracts.py | Fix | 补齐0x0031=0x0011放出餐口1；先发布只读选位0x0033=1，改用当前协议3138/3128，拒绝其他出餐口。保留旧0x000B入口兼容；未修改订单、门控状态机，未烧录。 |
+| 2026-09-11 | Common/ConfigStore; Coffee3CloseApp/Config; coffee3_manager.c; coffee3_server.c; coffee3_workflow.c; Application/CMakeLists.txt; STM32F407_Base.uvprojx; tests/test_coffee3_config_contracts.py | Add/Modify | Coffee3单份sector2配置默认mask=3，0x001A全16位立即持久化，手动位置21/22映射放存储位1/2，其余存储位仍拒绝；7项源码契约检查通过，Keil完整构建0错2既有警告，GCC双Target构建通过。未烧录，见配置落地验收报告。 |
+| 2026-09-11 | 上位机可配置参数调研与单地址Flash落地审批方案.md | Add | 对照当前Word协议与Coffee1配置写入链，区分长期配置/任务参数；确定0x001A全16位原值保存、实际低两位选位及固定地址单副本立即覆盖。仅审批文档。 |
+| 2026-09-11 | 配置参数Flash管理最终落地方案.md | Add | 收敛为独立sector2配置管理，核对HTTP网页常量位于应用区；不合并OTA/端口，明确单扇区追加和满区维护边界。仅方案。 |
+| 2026-09-11 | Coffee1持久化全量调研与分类存储落地方案V2.md; Coffee3存储位调试拒绝与非OTA持久化规划.md | Add/Update | 重审Coffee1应用Flash写入链及92字节参数结构，补全OTA/配置/运行变量分类、结构扩展迁移、A/B提交、双工具链参数保留和外部全擦备份恢复；旧方案标记被替代。本轮仅文档。 |
+| 2026-09-11 | 资料文档/03_技术实现核心文档/04_执行报告与审计/Coffee3存储位调试拒绝与非OTA持久化规划.md | Add | 调研手动位置21/22映射缺失、Coffee1非OTA参数字段及Flash写入路径；提出sector10/11统一持久化与存储位掩码方案，仅文档，未改固件。 |
+| 2026-09-10 | Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c; Device/coffee3_device.h; WorkFlow/coffee3_workflow.c; Coffee3机器人启动触发边界修正.md | Fix | 完整机器人启动仅由新 TCP 会话或订单按需准备触发；手动停止/开始不触发自动启动，修正已完成初始化与本体 READY 的耦合。Keil/GCC Coffee3Close 编译通过，未烧录，待上板验证。 |
 | 2026-09-07 | Coffee3CloseApp/Config/coffee3_app_config.h; Coffee3CloseApp/WorkFlow/coffee3_workflow.c; Coffee3出餐门初始化与5秒超时审查.md; 工程基础缓存.md; 全局审查.md | Modify/Add | 门上升关门 DO1/DI1、下降开门 DO2/DI2；运动超时改为5秒，分离限位冲突和方向超时日志。Keil Coffee3Close 0错误0警告，未烧录。 |
 | 2026-09-03 | `资料文档/02_工具链说明/Git工具链/Git使用与GitHub维护说明书.md`; `CHANGES.md` | Add/Modify | 新增当前 Project_Base Git/GitHub 初始化、上传、维护、冲突、缓存忽略、LFS 和故障排查说明。 |
 | 2026-09-03 | `.gitignore`; `CHANGES.md` | Modify | 以恢复后的 Project_Base 本地内容重新建立独立 Git 仓库，补充 Codex/Agent、GCC、Keil 临时文件忽略规则；准备覆盖远程错误版本。 |

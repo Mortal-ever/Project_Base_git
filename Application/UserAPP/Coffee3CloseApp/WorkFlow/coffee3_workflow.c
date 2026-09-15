@@ -6,6 +6,7 @@
   */
 
 #include "coffee3_workflow.h"
+#include "coffee3_config.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 #include "coffee3_io.h"
 #include "coffee3_log.h"
 #include "coffee3_server.h"
+#include "coffee3_robot_tcp.h"
 #include "queue.h"
 #include "task.h"
 
@@ -105,6 +107,10 @@ static uint8_t s_ucOutletPhase;
 static uint8_t s_ucDoorDirection;
 static uint8_t s_ucDoorFault;
 static TickType_t s_xDoorStart;
+static uint8_t s_ucDoorDebugPending;
+static uint8_t s_ucDoorDebugDirection;
+static uint8_t s_ucDoorDebugActive;
+static uint8_t s_ucDoorDebugActiveDirection;
 static TickType_t s_xEmptyStart;
 static uint8_t s_ucEmptyTiming;
 static uint16_t s_usActiveDevices;
@@ -259,6 +265,25 @@ BaseType_t xCoffee3WorkflowAcquireManual(void)
 }
 
 /*-----------------------------------------------------------*/
+BaseType_t xCoffee3WorkflowAcquireDeferredManual(void)
+{
+	BaseType_t xResult;
+
+	xResult = pdFAIL;
+	taskENTER_CRITICAL();
+	if ((s_ucInitializationComplete != 0U) &&
+		(s_ucOtaReserved == 0U) &&
+		(g_xCoffee3WorkflowStatus.ucRecoveryRequired == 0U) &&
+		(g_xCoffee3WorkflowStatus.xMachineState != COFFEE3_MACHINE_INITIALIZING) &&
+		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_CANCELING)) {
+		s_usManualReservations++;
+		xResult = pdPASS;
+	}
+	taskEXIT_CRITICAL();
+	return xResult;
+}
+
+/*-----------------------------------------------------------*/
 void vCoffee3WorkflowReleaseManual(void)
 {
 	taskENTER_CRITICAL();
@@ -331,6 +356,50 @@ void vCoffee3WorkflowConfirmPickup(uint16_t usOutput)
 }
 
 /*-----------------------------------------------------------*/
+uint8_t ucCoffee3WorkflowManualDispatchAllowed(void)
+{
+	uint8_t ucAllowed;
+
+	ucAllowed = 0U;
+	taskENTER_CRITICAL();
+	if ((s_usManualReservations != 0U) &&
+		(s_ucInitializationComplete != 0U) &&
+		(g_xCoffee3WorkflowStatus.ucRecoveryRequired == 0U) &&
+		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
+		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_CANCELING) &&
+		(s_ucMaintenanceActive == 0U) && (s_ucStoragePickupPending == 0U) &&
+		(s_xMaintenance.ucPending == 0U) && (s_ucManualIcePending == 0U) &&
+		(s_ucOtaReserved == 0U) &&
+		(s_ucCoffeeFillActive == 0U) &&
+		(s_ucOutletPhase == 0U) &&
+		(s_xHotWater.ucPhase == COFFEE3_HOT_WATER_IDLE)) {
+		ucAllowed = 1U;
+	}
+	taskEXIT_CRITICAL();
+	return ucAllowed;
+}
+
+/*-----------------------------------------------------------*/
+BaseType_t xCoffee3WorkflowSubmitDoorDebug(uint8_t ucDirection)
+{
+	BaseType_t xResult;
+
+	if (ucDirection > 2U) {
+		return pdFAIL;
+	}
+	xResult = pdFAIL;
+	taskENTER_CRITICAL();
+	if ((s_ucInitializationComplete != 0U) &&
+		(s_ucDoorDebugPending == 0U)) {
+		s_ucDoorDebugDirection = ucDirection;
+		s_ucDoorDebugPending = 1U;
+		xResult = pdPASS;
+	}
+	taskEXIT_CRITICAL();
+	return xResult;
+}
+
+/*-----------------------------------------------------------*/
 
 /* Current owner state is authoritative. IO additionally needs fresh samples. */
 static uint16_t prvReadyDevices(void)
@@ -398,8 +467,8 @@ static uint8_t prvMaintenanceReady(Coffee3MaintenanceType_e xType)
 static uint8_t prvOrderDevicesReady(const Coffee3Order_t *pxOrder)
 {
 	uint16_t usRequired;
-	usRequired = (1U << COFFEE3_DEVICE_ROBOT) |
-		(1U << COFFEE3_DEVICE_IO_INPUT) | (1U << COFFEE3_DEVICE_CUP_MACHINE) |
+	/* Robot RUNNING is established by the owner at order start, not admission. */
+	usRequired = (1U << COFFEE3_DEVICE_IO_INPUT) | (1U << COFFEE3_DEVICE_CUP_MACHINE) |
 		(1U << COFFEE3_DEVICE_LID_MACHINE);
 	if (pxOrder->ausRegister[COFFEE3_REG_COFFEE_TYPE] != 0xFFFFU) {
 		usRequired |= (1U << COFFEE3_DEVICE_COFFEE_MACHINE);
@@ -419,6 +488,7 @@ static uint8_t prvOrderDevicesReady(const Coffee3Order_t *pxOrder)
 		usRequired |= (1U << COFFEE3_DEVICE_SYRUP_MACHINE);
 	}
 	return ((s_ucInitializationComplete != 0U) &&
+		(g_xCoffee3RobotTcpStatus.ucConnected != 0U) &&
 		((prvReadyDevices() & usRequired) == usRequired)) ? 1U : 0U;
 }
 
@@ -474,7 +544,10 @@ static void prvServiceInitialization(void)
 		(s_ucDoorDirection == 0U) &&
 		(xIo.xInput.aucXPin[0] != 0U) &&
 		(xIo.xInput.aucXPin[1] == 0U) &&
-		((usReady & usResidualRequired) == usResidualRequired)) ? 1U : 0U;
+		/* Completed residual initialization is not undone by manual STOP.
+		 * The order owner prepares body readiness before production motion. */
+		(g_xCoffee3RobotTcpStatus.ucConnected != 0U) &&
+		((usReady & (1U << COFFEE3_DEVICE_IO_INPUT)) != 0U)) ? 1U : 0U;
 	s_ucInitializationComplete = ucBaseReady;
 	if (ucBaseReady != s_ucLastBaseReady) {
 		s_ucLastBaseReady = ucBaseReady;
@@ -520,11 +593,73 @@ static void prvServicePickup(void)
 	Coffee3IoState_t xIo;
 	TickType_t xNow;
 	uint8_t ucCup;
+	uint8_t ucDoorDebugRequest;
+	uint8_t ucDoorDebugDirection;
+	uint8_t ucDoorConflict;
+	uint8_t ucDoorTimeout;
+	const char *pcDoorDirection;
+	const char *pcPreviousDoorDirection;
 	const char *pcDoorFailure;
 
 	vCoffee3IoRefreshLocal();
 	vCoffee3IoGetSnapshot(&xIo);
 	xNow = xTaskGetTickCount();
+	ucDoorDebugRequest = 0U;
+	ucDoorDebugDirection = 0U;
+	taskENTER_CRITICAL();
+	if (s_ucDoorDebugPending != 0U) {
+		ucDoorDebugRequest = 1U;
+		ucDoorDebugDirection = s_ucDoorDebugDirection;
+		s_ucDoorDebugPending = 0U;
+	}
+	taskEXIT_CRITICAL();
+	if (ucDoorDebugRequest != 0U) {
+		pcDoorDirection = (ucDoorDebugDirection == 1U) ? "CLOSE" :
+			(ucDoorDebugDirection == 2U) ? "OPEN" : "STOP";
+		if (s_ucDoorDirection != 0U) {
+			pcPreviousDoorDirection = (s_ucDoorDirection == 1U) ?
+				"CLOSE" : "OPEN";
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+				"Door %s interrupted by %s; DO1 and DO2 off",
+				pcPreviousDoorDirection, pcDoorDirection);
+			s_ucDoorDebugActive = 0U;
+			s_ucDoorDebugActiveDirection = 0U;
+		}
+		if (ucDoorDebugDirection == 0U) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+				"Door STOP execution started: DO1 and DO2 off");
+		} else {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+				"Door %s execution requested: DO%u, target DI%u", pcDoorDirection,
+				(unsigned int)ucDoorDebugDirection,
+				(unsigned int)ucDoorDebugDirection);
+		}
+		if (ucDoorDebugDirection == 0U) {
+			prvStartDoor(0U);
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+				"Door STOP complete: DO1 and DO2 off");
+		} else if ((xIo.xInput.aucXPin[0] != 0U) &&
+			(xIo.xInput.aucXPin[1] != 0U)) {
+			prvStartDoor(ucDoorDebugDirection);
+			s_ucDoorDebugActive = 1U;
+			s_ucDoorDebugActiveDirection = ucDoorDebugDirection;
+		} else if (xIo.xInput.aucXPin[ucDoorDebugDirection - 1U] != 0U) {
+			prvStartDoor(0U);
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+				"Door %s already at DI%u; DO1 and DO2 off",
+				pcDoorDirection, (unsigned int)ucDoorDebugDirection);
+		} else {
+			prvStartDoor(ucDoorDebugDirection);
+			s_ucDoorDebugActive = 1U;
+			s_ucDoorDebugActiveDirection = ucDoorDebugDirection;
+		}
+		xNow = xTaskGetTickCount();
+	}
 	if ((s_ucDoorFault != 0U) && (s_ucDoorDirection == 0U) &&
 		(xIo.xInput.aucXPin[s_ucDoorExpectedLimit - 1U] != 0U) &&
 		(xIo.xInput.aucXPin[2U - s_ucDoorExpectedLimit] == 0U)) {
@@ -541,9 +676,12 @@ static void prvServicePickup(void)
 			"Water X4 lost; finish active order normally, reject next order until recovery ACK");
 	}
 	if (s_ucDoorDirection != 0U) {
+		ucDoorConflict = ((xIo.xInput.aucXPin[0] != 0U) &&
+			(xIo.xInput.aucXPin[1] != 0U)) ? 1U : 0U;
+		ucDoorTimeout = ((xNow - s_xDoorStart) >=
+			pdMS_TO_TICKS(COFFEE3_DOOR_MOTION_TIMEOUT_MS)) ? 1U : 0U;
 		if ((s_ucDoorFault != 0U) ||
-			((xIo.xInput.aucXPin[0] != 0U) && (xIo.xInput.aucXPin[1] != 0U)) ||
-			((xNow - s_xDoorStart) >= pdMS_TO_TICKS(COFFEE3_DOOR_MOTION_TIMEOUT_MS))) {
+			(ucDoorConflict != 0U) || (ucDoorTimeout != 0U)) {
 			pcDoorFailure = (s_ucDoorFault != 0U) ?
 				"Outlet door fault latched; outputs off; waiting for valid target limit" :
 				((xIo.xInput.aucXPin[0] != 0U) &&
@@ -555,11 +693,46 @@ static void prvServicePickup(void)
 			prvStartDoor(0U);
 			s_ucDoorFault = 1U;
 			g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
-			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
-				COFFEE3_LOG_SOURCE_WORKFLOW,
-				g_xCoffee3WorkflowStatus.ausOutputOrderId[0],
-				"%s", pcDoorFailure);
+			if (s_ucDoorDebugActive != 0U) {
+				pcDoorDirection =
+					(s_ucDoorDebugActiveDirection == 1U) ? "CLOSE" : "OPEN";
+				if (ucDoorConflict != 0U) {
+					(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+						COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+						"Door %s conflict: DI1 and DI2 active; DO1 and DO2 off",
+						pcDoorDirection);
+				} else if (ucDoorTimeout != 0U) {
+					(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+						COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+						"Door %s timeout: DI%u not confirmed; DO1 and DO2 off",
+						pcDoorDirection,
+						(unsigned int)s_ucDoorDebugActiveDirection);
+				} else {
+					(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+						COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+						"Door %s interrupted: fault latched; DO1 and DO2 off",
+						pcDoorDirection);
+				}
+				s_ucDoorDebugActive = 0U;
+				s_ucDoorDebugActiveDirection = 0U;
+			} else {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.ausOutputOrderId[0],
+					"%s", pcDoorFailure);
+			}
 		} else if (xIo.xInput.aucXPin[s_ucDoorDirection - 1U] != 0U) {
+			if (s_ucDoorDebugActive != 0U) {
+				pcDoorDirection =
+					(s_ucDoorDebugActiveDirection == 1U) ? "CLOSE" : "OPEN";
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+					COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+					"Door %s complete: DI%u confirmed; DO1 and DO2 off",
+					pcDoorDirection,
+					(unsigned int)s_ucDoorDebugActiveDirection);
+				s_ucDoorDebugActive = 0U;
+				s_ucDoorDebugActiveDirection = 0U;
+			}
 			prvStartDoor(0U);
 		} else {
 			(void)ucCoffee3IoSetLocalOutput((uint8_t)(s_ucDoorDirection - 1U), 1U);
@@ -646,14 +819,17 @@ static int32_t prvSelectStorage(void)
 	Coffee3IoState_t xIo;
 	int32_t lResult;
 	uint8_t ucIndex;
+	uint16_t usEnabled;
 
 	lResult = prvRefreshDeviceQuiet(0xFD1FU, COFFEE3_DEVICE_IO_INPUT);
 	vCoffee3IoGetSnapshot(&xIo);
 	if ((lResult != 0) || (prvIoValid(&xIo) == 0U)) {
 		return COFFEE3_WORKFLOW_ERROR_IO;
 	}
+	usEnabled = usCoffee3ConfigStorageMask() & COFFEE3_STORAGE_INSTALLED_MASK;
 	for (ucIndex = 0U; ucIndex < 2U; ucIndex++) {
-		if (xIo.xInput.aucMB1XPin[ucIndex] == 0U) {
+		if (((usEnabled & (1U << ucIndex)) != 0U) &&
+			(xIo.xInput.aucMB1XPin[ucIndex] == 0U)) {
 			return (int32_t)(ucIndex + 1U);
 		}
 	}
@@ -680,6 +856,10 @@ BaseType_t xCoffee3WorkflowInitialize(void)
 	s_ucOutletPhase = 0U;
 	s_ucDoorDirection = 0U;
 	s_ucDoorFault = 0U;
+	s_ucDoorDebugPending = 0U;
+	s_ucDoorDebugDirection = 0U;
+	s_ucDoorDebugActive = 0U;
+	s_ucDoorDebugActiveDirection = 0U;
 	s_ucEmptyTiming = 0U;
 	s_usActiveDevices = 0U;
 	memset(&s_xHotWater, 0, sizeof(s_xHotWater));
@@ -893,6 +1073,7 @@ void vCoffee3WorkflowTask(void *pvArgument)
 	int32_t lSafetyResult;
 	uint16_t usStoragePickup;
 	uint16_t usManualIceWeight;
+	uint8_t ucManualBarrier;
 	Coffee3MaintenanceRequest_t xMaintenance;
 
 	(void)pvArgument;
@@ -906,9 +1087,11 @@ void vCoffee3WorkflowTask(void *pvArgument)
 		taskENTER_CRITICAL();
 		usStoragePickup = s_ucStoragePickupPending;
 		s_ucStoragePickupPending = 0U;
-		taskEXIT_CRITICAL();
 		if (usStoragePickup != 0U) {
 			s_ucMaintenanceActive = 1U;
+		}
+		taskEXIT_CRITICAL();
+		if (usStoragePickup != 0U) {
 			s_usActiveDevices = 0U;
 			g_xCoffee3WorkflowStatus.ucPositionUncertain = 0U;
 			g_xCoffee3WorkflowStatus.ucCancelRequested = 0U;
@@ -927,6 +1110,22 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			g_xCoffee3WorkflowStatus.xState = (lResult == 0) ?
 				COFFEE3_WORKFLOW_IDLE : COFFEE3_WORKFLOW_FAILED;
 			vCoffee3ServerFinishRequest(1U);
+			continue;
+		}
+		/* Existing pickup or maintenance work above retains ownership. Once it
+		 * releases, a deferred Robot reservation gets the next boundary before
+		 * an order can be dequeued. */
+		taskENTER_CRITICAL();
+		ucManualBarrier = ((s_usManualReservations != 0U) &&
+			(s_ucManualIcePending == 0U) &&
+			(s_xMaintenance.ucPending == 0U)) ? 1U : 0U;
+		taskEXIT_CRITICAL();
+		if (ucManualBarrier != 0U) {
+			prvServiceIoRefresh();
+			vTaskDelay(pdMS_TO_TICKS(COFFEE3_WORKFLOW_IO_REFRESH_MS));
+			continue;
+		}
+		if (prvQueuePendingOrder() != 0U) {
 			continue;
 		}
 		if (xQueueReceive(s_xOrderQueue, &xOrder,
@@ -1047,6 +1246,18 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			continue;
 		}
 		taskENTER_CRITICAL();
+		/* Claim the next business while holding the same critical boundary
+		 * used by deferred manual admission. A later debug request then waits
+		 * for this whole order instead of racing its start. */
+		if (s_usManualReservations != 0U) {
+			taskEXIT_CRITICAL();
+			if (xQueueSendToFront(s_xOrderQueue, &xOrder, 0U) != pdPASS) {
+				(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_ERROR,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					"ORDER_REQUEUE_FAILED_FOR_MANUAL", -1);
+			}
+			continue;
+		}
 		s_ulNextOrderEpoch++;
 		if (s_ulNextOrderEpoch == 0U) {
 			s_ulNextOrderEpoch = 1U;
@@ -1064,6 +1275,7 @@ void vCoffee3WorkflowTask(void *pvArgument)
 		g_xCoffee3WorkflowStatus.lSafetyResult = 0;
 		g_xCoffee3WorkflowStatus.usActiveOutput = 1U;
 		g_xCoffee3WorkflowStatus.ucContentComplete = 0U;
+		g_xCoffee3WorkflowStatus.xState = COFFEE3_WORKFLOW_RUNNING;
 		taskEXIT_CRITICAL();
 		vCoffee3ServerPublishOrder(&xOrder);
 		prvPublish(COFFEE3_WORKFLOW_RUNNING, 1U, 0);
@@ -1144,9 +1356,9 @@ static uint8_t prvQueuePendingOrder(void)
 	Coffee3Order_t xOrder;
 
 	taskENTER_CRITICAL();
-	if (s_ucPendingOrder == 0U) {
+	if ((s_ucPendingOrder == 0U) || (s_usManualReservations != 0U)) {
 		taskEXIT_CRITICAL();
-		return 0U;
+		return (s_ucPendingOrder != 0U) ? 1U : 0U;
 	}
 	xOrder = s_xPendingOrder;
 	s_ucPendingOrder = 0U;
@@ -1184,7 +1396,6 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	EventBits_t xEvents;
 	TickType_t xStartTick;
 	TickType_t xTimeoutTicks;
-	uint8_t ucRobotTimingStarted;
 	uint8_t ucOrderStep;
 	uint16_t usLogOrder;
 	uint8_t ucInitializationStep;
@@ -1266,8 +1477,15 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	xTimeoutTicks = pdMS_TO_TICKS((xDeviceId == COFFEE3_DEVICE_ROBOT) ?
 		ulTimeoutMs : (ulTimeoutMs +
 			(4U * COFFEE3_WORKFLOW_DEVICE_IO_TIMEOUT_MS)));
-	ucRobotTimingStarted = ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-		(prvRobotPositionAction(xAction) != 0U)) ? 0U : 1U;
+	if ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
+		(prvRobotPositionAction(xAction) != 0U)) {
+		/* The Robot owner enforces phase deadlines. This absolute watchdog
+		 * also bounds a command stranded before the owner receives it. */
+		xTimeoutTicks = pdMS_TO_TICKS(COFFEE3_ROBOT_RECOVERY_TIMEOUT_MS +
+			COFFEE3_ROBOT_ACCEPT_TIMEOUT_MS + COFFEE3_ROBOT_MOTION_TIMEOUT_MS +
+			(COFFEE3_ROBOT_PREPARE_RETRY_LIMIT + 1U) *
+			COFFEE3_ROBOT_PREPARE_RETRY_MS + 2U * COFFEE3_ROBOT_IO_TIMEOUT_MS);
+	}
 	for (;;) {
 		xEvents = xCoffee3DeviceWaitCommand(xDeviceId,
 			xCommand.ulOrderEpoch, xCommand.ulCommandId,
@@ -1363,31 +1581,7 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 				(int32_t)usStep);
 			return COFFEE3_WORKFLOW_ERROR_CANCELED;
 		}
-		if ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-			(prvRobotPositionAction(xAction) != 0U)) {
-			if ((g_axCoffee3DeviceStatus[xDeviceId].ulLastCommandId ==
-					xCommand.ulCommandId) &&
-					(g_axCoffee3DeviceStatus[xDeviceId].ulLastOrderEpoch ==
-						xCommand.ulOrderEpoch) &&
-					(g_axCoffee3DeviceStatus[xDeviceId].ucRobotAccepted != 0U) &&
-					(ucRobotTimingStarted == 0U)) {
-				ucRobotTimingStarted = 1U;
-				xStartTick = xTaskGetTickCount();
-			}
-			if ((g_axCoffee3DeviceStatus[xDeviceId].ulLastCommandId !=
-				xCommand.ulCommandId) ||
-				(g_axCoffee3DeviceStatus[xDeviceId].ulLastOrderEpoch !=
-					xCommand.ulOrderEpoch) ||
-				(g_axCoffee3DeviceStatus[xDeviceId].ucRobotAccepted == 0U) ||
-				(g_axCoffee3DeviceStatus[xDeviceId].ucRecovering != 0U)) {
-				xStartTick = xTaskGetTickCount();
-			} else if (ucRobotTimingStarted == 0U) {
-				ucRobotTimingStarted = 1U;
-				xStartTick = xTaskGetTickCount();
-			}
-		}
-		if ((ucRobotTimingStarted != 0U) &&
-			((xTaskGetTickCount() - xStartTick) >= xTimeoutTicks)) {
+		if ((xTaskGetTickCount() - xStartTick) >= xTimeoutTicks) {
 			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_ERROR,
 				COFFEE3_LOG_SOURCE_WORKFLOW,
 				usLogOrder,
@@ -1472,7 +1666,7 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 		(pxOrder->ausRegister[COFFEE3_REG_SYRUP_3] != 0U) ||
 		(pxOrder->ausRegister[COFFEE3_REG_SYRUP_4] != 0U)) ? 1U : 0U;
 	lResult = prvRunStep(10U, COFFEE3_DEVICE_ROBOT,
-		COFFEE3_ACTION_REFRESH, 0U, 0U, 3000U);
+		COFFEE3_ACTION_ROBOT_PREPARE_ORDER, 0U, 0U, 30000U);
 	if ((lResult == 0) && (ucNeedCoffeeStation != 0U)) {
 		lResult = prvRunStep(20U, COFFEE3_DEVICE_COFFEE_MACHINE,
 			COFFEE3_ACTION_REFRESH, 0U, 0U, 3000U);
@@ -2524,7 +2718,9 @@ static void prvServiceCoffeeFill(void)
 	taskENTER_CRITICAL();
 	if ((ucAllowed != 0U) &&
 		(s_ucCoffeeFillAlarm == 0U) && (s_ucOtaReserved == 0U) &&
-		(s_usManualReservations == 0U) &&
+		((s_usManualReservations == 0U) ||
+		 (g_xCoffee3WorkflowStatus.xState == COFFEE3_WORKFLOW_RUNNING) ||
+		 (s_ucMaintenanceActive != 0U)) &&
 		(g_xCoffee3WorkflowStatus.ucRecoveryRequired == 0U) &&
 		(xIo.xInput.aucXPin[COFFEE3_LOCAL_DI_COFFEE_WATER_LOW] == 0U) &&
 		(xIo.xInput.aucXPin[COFFEE3_LOCAL_DI_COFFEE_WATER_HIGH] == 0U)) {

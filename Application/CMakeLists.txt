@@ -191,6 +191,8 @@ elseif(PRODUCT_NAME STREQUAL "Coffee3Close")
     set(COFFEE3_APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/UserAPP/Coffee3CloseApp)
 
     add_library(coffee3_app OBJECT
+        Common/ConfigStore/config_store.c
+        ${COFFEE3_APP_ROOT}/Config/coffee3_config.c
         ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_log.c
         ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_crash_log_port.c
         ${COFFEE3_APP_ROOT}/Comm_Log/coffee3_retarget.c

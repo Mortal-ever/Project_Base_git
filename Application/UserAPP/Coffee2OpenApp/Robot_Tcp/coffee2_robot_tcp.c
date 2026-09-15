@@ -22,8 +22,12 @@
 #include "TcpClientSession/tcp_client_session.h"
 #include "transport_tcp.h"
 
+static uint8_t s_ucFreshReadyReset;
+static uint8_t s_ucConnectionStartupPending;
+
 /** @brief Period between connected Robot health snapshots. */
 #define COFFEE2_ROBOT_HEALTH_MS              2000U
+#define COFFEE2_ROBOT_STARTUP_RETRY_MS        3000U
 #define COFFEE2_ROBOT_STARTUP_STEP_DELAY_MS  200U
 #define COFFEE2_ROBOT_STARTUP_FINAL_WAIT_MS  8000U
 #define COFFEE2_ROBOT_STARTUP_POLL_MS        100U
@@ -452,8 +456,6 @@ static void prvSetRobotReady(uint8_t ucReady);
   * @param[in] ulFailures Consecutive failure count.
   * @return Delay in milliseconds.
   */
-static uint32_t prvRetryDelayMs(uint32_t ulFailures);
-
 static const uint32_t s_aulCoffee2RobotRetryDelayMs[] = {
 	1000U, 2000U, 5000U, 10000U, 30000U
 };
@@ -476,6 +478,8 @@ static const uint8_t s_aucCoffee2RobotIp[4] = {
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee2RobotTcpInitialize(void)
 {
+	s_ucFreshReadyReset = 0U;
+	s_ucConnectionStartupPending = 0U;
 	memset(&g_xCoffee2RobotTcpStatus, 0,
 		sizeof(g_xCoffee2RobotTcpStatus));
 	memset(&g_xCoffee2RobotData, 0, sizeof(g_xCoffee2RobotData));
@@ -631,15 +635,36 @@ void vCoffee2RobotTcpTask(void *pvArgument)
 			continue;
 		}
 		vTcpClientSessionProcess(&xSession);
+		/* Body coils remain directly available while the custom program is
+		 * stopped; protocol motion still waits for strict readiness. */
+		if ((g_xCoffee2RobotTcpStatus.ucConnected != 0U) &&
+			(xQueuePeek(s_xRobotQueue, &xCommand, 0U) == pdPASS) &&
+			(prvResolveCoffee2Dobot(&xCommand,
+				&xResolvedCommand) != 0U) &&
+			(xResolvedCommand.xKind == COFFEE2_DOBOT_COMMAND_BODY) &&
+			(xQueueReceive(s_xRobotQueue, &xCommand, 0U) == pdPASS)) {
+			vCoffee2DeviceCommandStarted(&xCommand);
+			xResult = prvExecute(&xPort, &xCommand, &xTransaction,
+				&ucActionTimedOut);
+			vCoffee2DeviceCommandCompleted(&xCommand, (int32_t)xResult,
+				(xResult == MODBUS_PORT_RESULT_TIMEOUT) ? 1U : 0U);
+			(void)xCoffee2LogWriteFieldOrder(COFFEE2_LOG_LEVEL_INFO,
+				COFFEE2_LOG_SOURCE_ROBOT, (uint16_t)xCommand.ulOrderId,
+				"Robot body control completed", (int32_t)xResult,
+				"action", (int32_t)xCommand.usAction);
+		}
 		if (ucTcpClientSessionIsOnline(&xSession) == 0U) {
 			ucSessionReady = 0U;
 			ucReconciledSession = 0U;
 			ucWarmAttachLogged = 0U;
+			xNextStartupRetryTick = 0U;
+			ulStartupFailures = 0U;
 			vTaskDelay(pdMS_TO_TICKS(50U));
 			continue;
 		}
 
-		if (ucSessionReady == 0U) {
+		if ((ucSessionReady == 0U) ||
+			(s_ucConnectionStartupPending != 0U)) {
 			if ((xTransaction.ucActive == 0U) &&
 				(ucDeferredCommand == 0U) &&
 				(xQueuePeek(s_xRobotQueue, &xCommand, 0U) == pdPASS) &&
@@ -773,28 +798,48 @@ void vCoffee2RobotTcpTask(void *pvArgument)
 				}
 				prvSetRobotReady(prvRobotStrictReady());
 			}
-			if ((ucSessionCommandPending == 0U) &&
-				(xTransaction.ucActive == 0U) &&
-				(prvRobotOperational() == 0U)) {
-				if ((int32_t)(xTaskGetTickCount() -
-					xNextStartupRetryTick) < 0) {
+			if ((s_ucConnectionStartupPending != 0U) &&
+				(xTransaction.ucActive == 0U)) {
+				if ((ulStartupFailures != 0U) &&
+					((int32_t)(xTaskGetTickCount() -
+					xNextStartupRetryTick) < 0)) {
 					vTaskDelay(pdMS_TO_TICKS(50U));
 					continue;
 				}
-				(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
-					COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_ATTEMPT", 0,
-					"attempt", (int32_t)(ulStartupFailures + 1U));
-				xStartupOutcome = COFFEE2_ROBOT_STARTUP_OK;
-				xResult = prvStartup(&xPort, 0U, &xStartupOutcome);
-				if ((xResult != MODBUS_PORT_RESULT_OK) ||
-					(xStartupOutcome != COFFEE2_ROBOT_STARTUP_OK)) {
+				xResult = prvRefresh(&xPort,
+					COFFEE2_ROBOT_IO_TIMEOUT_MS);
+				if ((xResult == MODBUS_PORT_RESULT_OK) &&
+					(prvRobotStrictReady() != 0U)) {
+					s_ucConnectionStartupPending = 0U;
+					ulStartupFailures = 0U;
+					xNextStartupRetryTick = 0U;
+					(void)xCoffee2LogWrite(COFFEE2_LOG_LEVEL_INFO,
+						COFFEE2_LOG_SOURCE_ROBOT,
+						"ROBOT_STARTUP_FRESH_READY", 0);
+				} else {
+					(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
+						COFFEE2_LOG_SOURCE_ROBOT,
+						"ROBOT_STARTUP_ATTEMPT", 0,
+						"attempt", (int32_t)(ulStartupFailures + 1U));
+					xStartupOutcome = COFFEE2_ROBOT_STARTUP_OK;
+					if (xResult == MODBUS_PORT_RESULT_OK) {
+						xResult = prvStartup(&xPort, 0U,
+							&xStartupOutcome);
+					}
+					if ((xResult == MODBUS_PORT_RESULT_OK) &&
+						(xStartupOutcome == COFFEE2_ROBOT_STARTUP_OK) &&
+						(prvRobotStrictReady() != 0U)) {
+						s_ucConnectionStartupPending = 0U;
+						ulStartupFailures = 0U;
+						xNextStartupRetryTick = 0U;
+					} else {
 					ulStartupFailures++;
 					xNextStartupRetryTick = xTaskGetTickCount() + pdMS_TO_TICKS(
-						prvRetryDelayMs(ulStartupFailures));
+						COFFEE2_ROBOT_STARTUP_RETRY_MS);
 					if (prvRobotLinkFailureConfirmed(&xPort, xResult,
 						&ucLinkProbeAttempted) != 0U) {
 						prvDisconnectRobot(&xSession, (int32_t)xResult);
-					} else if (xStartupOutcome != COFFEE2_ROBOT_STARTUP_OK) {
+					} else {
 						vCoffee2DeviceSetOnline(COFFEE2_DEVICE_ROBOT, 1U);
 						vCoffee2DeviceSetReady(COFFEE2_DEVICE_ROBOT, 0U);
 						prvSetRobotReady(0U);
@@ -802,18 +847,11 @@ void vCoffee2RobotTcpTask(void *pvArgument)
 							COFFEE2_LOG_LEVEL_INFO,
 							COFFEE2_LOG_SOURCE_ROBOT,
 							"ROBOT_STARTUP_RETRY_SCHEDULED", 0,
-							"delay_ms", (int32_t)prvRetryDelayMs(
-								ulStartupFailures));
+							"delay_ms", COFFEE2_ROBOT_STARTUP_RETRY_MS);
 					}
+					vTaskDelay(pdMS_TO_TICKS(50U));
 					continue;
-				}
-				xResult = prvRefresh(&xPort, COFFEE2_ROBOT_IO_TIMEOUT_MS);
-				if (xResult != MODBUS_PORT_RESULT_OK) {
-					if (prvRobotLinkFailureConfirmed(&xPort, xResult,
-						&ucLinkProbeAttempted) != 0U) {
-						prvDisconnectRobot(&xSession, (int32_t)xResult);
 					}
-					continue;
 				}
 			}
 			if (prvRobotOperational() != 0U) {
@@ -824,6 +862,11 @@ void vCoffee2RobotTcpTask(void *pvArgument)
 				ulStartupFailures = 0U;
 				g_xCoffee2RobotTcpStatus.ulConsecutiveFailures = 0U;
 				g_xCoffee2RobotTcpStatus.ulNextRetryDelayMs = 0U;
+			}
+			/* TCP session stays serviceable after a manual body STOP. */
+			if (s_ucConnectionStartupPending == 0U) {
+				ucSessionReady = 1U;
+				prvSetRobotReady(prvRobotStrictReady());
 			}
 			if (ucSessionCommandPending != 0U) {
 				ucSessionReady = 1U;
@@ -1134,12 +1177,22 @@ static int32_t prvRobotSessionProbe(void *pvOwnerContext,
 	uint32_t ulTimeoutMs)
 {
 	Coffee2RobotSessionContext_t *pxContext;
+	ModbusPortResult_e xResult;
 
 	pxContext = (Coffee2RobotSessionContext_t *)pvOwnerContext;
 	if ((pxContext == NULL) || (pxContext->pxPort == NULL)) {
 		return (int32_t)MODBUS_PORT_RESULT_INVALID_ARG;
 	}
-	return (int32_t)prvRefresh(pxContext->pxPort, ulTimeoutMs);
+	/* A historical 3100 value must not qualify a new TCP session. */
+	xResult = xModbusPortWriteCoil(pxContext->pxPort,
+		COFFEE2_ROBOT_UNIT_ID, 3100U, false, ulTimeoutMs);
+	s_ucFreshReadyReset = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
+	g_xCoffee2RobotData.aucControlCoils[0U] = 0U;
+	(void)xCoffee2LogWrite(COFFEE2_LOG_LEVEL_INFO,
+		COFFEE2_LOG_SOURCE_ROBOT,
+		"Reconnect: clear 3100; wait for fresh program ready signal",
+		(int32_t)xResult);
+	return (int32_t)xResult;
 }
 
 /*-----------------------------------------------------------*/
@@ -1178,6 +1231,8 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 	if ((xPreviousState == TCP_CLIENT_SESSION_CONNECTING) &&
 		(xCurrentState == TCP_CLIENT_SESSION_PROTOCOL_CHECK)) {
 		g_xCoffee2RobotTcpStatus.ucConnected = 1U;
+		s_ucConnectionStartupPending = 1U;
+		s_ucFreshReadyReset = 0U;
 		g_xCoffee2RobotTcpStatus.ulConnectSuccessCount++;
 		prvSetRobotReady(0U);
 		prvLogRobotConnected(s_aucCoffee2RobotIp, COFFEE2_ROBOT_PORT,
@@ -1198,6 +1253,8 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 		return;
 	}
 	if (xCurrentState == TCP_CLIENT_SESSION_BACKOFF) {
+		s_ucConnectionStartupPending = 0U;
+		s_ucFreshReadyReset = 0U;
 		g_xCoffee2RobotTcpStatus.ulErrorCount++;
 		g_xCoffee2RobotTcpStatus.ulConsecutiveFailures++;
 		g_xCoffee2RobotTcpStatus.ulNextRetryDelayMs = ulRetryDelayMs;
@@ -1247,6 +1304,8 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 		return;
 	}
 	if (xCurrentState == TCP_CLIENT_SESSION_NETWORK_WAIT) {
+		s_ucConnectionStartupPending = 0U;
+		s_ucFreshReadyReset = 0U;
 		if (g_xCoffee2RobotTcpStatus.ucConnected != 0U) {
 			g_xCoffee2RobotTcpStatus.ulDisconnectCount++;
 		}
@@ -1300,7 +1359,8 @@ static uint8_t prvRobotStrictReady(void)
 		DOBOT_ROBOT_BODY_STATUS_RUNNING];
 	ucIdle = g_xCoffee2RobotData.aucBaseInputs[
 		DOBOT_ROBOT_BODY_STATUS_IDLE];
-	if ((ucReady == 0U) || ((ucRunning == 0U) && (ucIdle == 0U)) ||
+	if ((s_ucFreshReadyReset == 0U) || (ucReady == 0U) ||
+		((ucRunning == 0U) && (ucIdle == 0U)) ||
 		(prvRobotOperational() == 0U)) {
 		return 0U;
 	}
@@ -1484,8 +1544,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 1,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
-	xResult = prvWriteControlValue(pxPort,
-		DOBOT_ROBOT_BODY_COMMAND_CLEAR_ALARM, true,
+	xResult = prvWriteRisingEdge(pxPort,
+		DOBOT_ROBOT_BODY_COMMAND_CLEAR_ALARM,
 		COFFEE2_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
@@ -1495,8 +1555,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 2,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
 	if (ucRecoverySafe == 0U) {
-		xResult = prvWriteControlValue(pxPort,
-			DOBOT_ROBOT_BODY_COMMAND_STOP, true,
+		xResult = prvWriteRisingEdge(pxPort,
+			DOBOT_ROBOT_BODY_COMMAND_STOP,
 			COFFEE2_ROBOT_IO_TIMEOUT_MS);
 		if (xResult != MODBUS_PORT_RESULT_OK) {
 			return xResult;
@@ -1516,8 +1576,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 4,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
-	xResult = prvWriteControlValue(pxPort,
-		DOBOT_ROBOT_BODY_COMMAND_CLEAR_ALARM, true,
+	xResult = prvWriteRisingEdge(pxPort,
+		DOBOT_ROBOT_BODY_COMMAND_CLEAR_ALARM,
 		COFFEE2_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
@@ -1526,8 +1586,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 5,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
-	xResult = prvWriteControlValue(pxPort,
-		DOBOT_ROBOT_BODY_COMMAND_EXIT_DRAG, true,
+	xResult = prvWriteRisingEdge(pxPort,
+		DOBOT_ROBOT_BODY_COMMAND_EXIT_DRAG,
 		COFFEE2_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
@@ -1536,8 +1596,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 6,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
-	xResult = prvWriteControlValue(pxPort,
-		DOBOT_ROBOT_BODY_COMMAND_ENABLE, true,
+	xResult = prvWriteRisingEdge(pxPort,
+		DOBOT_ROBOT_BODY_COMMAND_ENABLE,
 		COFFEE2_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
@@ -1547,8 +1607,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 		(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 			COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 7,
 			"state_mask", (int32_t)prvRobotStartupStateMask());
-		xResult = prvWriteControlValue(pxPort,
-			DOBOT_ROBOT_BODY_COMMAND_STOP, true,
+		xResult = prvWriteRisingEdge(pxPort,
+			DOBOT_ROBOT_BODY_COMMAND_STOP,
 			COFFEE2_ROBOT_IO_TIMEOUT_MS);
 		if (xResult != MODBUS_PORT_RESULT_OK) {
 			return xResult;
@@ -1558,8 +1618,8 @@ static ModbusPortResult_e prvStartup(ModbusPort_t *pxPort,
 	(void)xCoffee2LogWriteField(COFFEE2_LOG_LEVEL_INFO,
 		COFFEE2_LOG_SOURCE_ROBOT, "ROBOT_STARTUP_STEP", 8,
 		"state_mask", (int32_t)prvRobotStartupStateMask());
-	xResult = prvWriteControlValue(pxPort,
-		DOBOT_ROBOT_BODY_COMMAND_START, true,
+	xResult = prvWriteRisingEdge(pxPort,
+		DOBOT_ROBOT_BODY_COMMAND_START,
 		COFFEE2_ROBOT_IO_TIMEOUT_MS);
 	if (xResult != MODBUS_PORT_RESULT_OK) {
 		return xResult;
@@ -2010,20 +2070,4 @@ static ModbusPortResult_e prvAdvanceAction(ModbusPort_t *pxPort,
 		return MODBUS_PORT_RESULT_OK;
 	}
 	return MODBUS_PORT_RESULT_BUSY;
-}
-
-/*-----------------------------------------------------------*/
-static uint32_t prvRetryDelayMs(uint32_t ulFailures)
-{
-	static const uint32_t aulDelayMs[] = {
-		1000U, 2000U, 5000U, 10000U, 30000U
-	};
-	uint32_t ulIndex;
-
-	ulIndex = (ulFailures == 0U) ? 0U : ulFailures - 1U;
-	if (ulIndex >= (sizeof(aulDelayMs) / sizeof(aulDelayMs[0]))) {
-		ulIndex = (sizeof(aulDelayMs) /
-			sizeof(aulDelayMs[0])) - 1U;
-	}
-	return aulDelayMs[ulIndex];
 }

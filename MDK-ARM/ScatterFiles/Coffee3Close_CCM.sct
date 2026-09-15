@@ -1,19 +1,23 @@
 ; Coffee3Close STM32F407VG: same application/OTA partition as Coffee2.
-LR_IROM1 0x0800C000 0x00054000 {
-  ER_IROM1 0x0800C000 0x00054000 {
-    *.o (RESET, +First)
-    *(InRoot$$Sections)
-    .ANY (+RO)
-    .ANY (+XO)
+
+LR_IROM1 0x0800C000 0x00054000 {          ; 加载区域：起始 Flash 地址 0x0800C000，大小 0x54000 336K
+  ER_IROM1 0x0800C000 0x00054000 {        ; 执行区域：只读代码/常量，运行在 Flash
+    *.o (RESET, +First)                   ; 所有 .o 的 RESET 段，放在最前面
+    *(InRoot$$Sections)                   ; ARM 库初始化段
+    .ANY (+RO)                            ; 所有只读代码和常量
+    .ANY (+XO)                            ; 所有只执行代码
   }
-  RW_CCM 0x10000000 0x00010000 {
-    *.o (CCM_HEAP)
-    *.o (CCM_APP)
+
+  RW_CCM 0x10000000 0x00010000 {          ; CCM RAM 区域，起始 0x10000000，大小 0x10000 64K
+    *.o (CCM_HEAP)                        ; 所有 .o 的 CCM_HEAP 段
+    *.o (CCM_APP)                         ; 所有 .o 的 CCM_APP 段
   }
-  RW_IRAM2 0x2001C000 UNINIT 0x00004000 {
-    startup_stm32f407xx.o (STACK)
+
+  RW_IRAM2 0x2001C000 UNINIT 0x00004000 { ; IRAM2 区域，起始 0x2001C000，大小 0x4000，UNINIT 不加载初值
+    startup_stm32f407xx.o (STACK)         ; 启动文件中的 STACK 段，即栈
   }
-  RW_IRAM1 0x20000000 0x0001C000 {
-    .ANY (+RW +ZI)
+
+  RW_IRAM1 0x20000000 0x0001C000 {        ; IRAM1 区域，起始 0x20000000，大小 0x1C000
+    .ANY (+RW +ZI)                        ; 所有读写数据和零初始化数据
   }
 }

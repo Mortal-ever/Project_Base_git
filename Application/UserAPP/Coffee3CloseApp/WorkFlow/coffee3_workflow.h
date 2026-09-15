@@ -95,14 +95,20 @@ extern Coffee3WorkflowStatus_t g_xCoffee3WorkflowStatus;
 
 /** @brief Reserve manual access until the submitted command terminates. */
 BaseType_t xCoffee3WorkflowAcquireManual(void);
+/** @brief Reserve one debug Robot motion until the current business releases Robot ownership. */
+BaseType_t xCoffee3WorkflowAcquireDeferredManual(void);
 /** @brief Release one successful manual reservation in task context. */
 void vCoffee3WorkflowReleaseManual(void);
+/** @brief Return nonzero when a deferred Robot debug motion may begin. */
+uint8_t ucCoffee3WorkflowManualDispatchAllowed(void);
 /** @brief Reserve OTA only when initialized, idle and outputs are verified off. */
 BaseType_t xCoffee3WorkflowAcquireOta(void);
 /** @brief Release the OTA reservation only when its startup failed. */
 void vCoffee3WorkflowReleaseOta(void);
 /** @brief Queue a pickup ACK only for an already placed outlet transaction. */
 void vCoffee3WorkflowConfirmPickup(uint16_t usOutput);
+/** @brief Queue door 0=stop, 1=close/up, or 2=open/down for the owner. */
+BaseType_t xCoffee3WorkflowSubmitDoorDebug(uint8_t ucDirection);
 /** @brief Reserve one storage-to-outlet transfer for the Workflow owner. */
 BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage);
 

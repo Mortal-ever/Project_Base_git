@@ -13,6 +13,7 @@
 
 #include "coffee3_manager.h"
 #include "coffee3_app_config.h"
+#include "coffee3_config.h"
 #include "coffee3_device.h"
 #include "coffee3_device_image.h"
 #include "coffee3_io.h"
@@ -211,6 +212,8 @@ BaseType_t xCoffee3ServerInitialize(void)
 		sizeof(g_xCoffee3ServerStatus));
 	memset(s_ausCommandRegisters, 0,
 		sizeof(s_ausCommandRegisters));
+	s_ausCommandRegisters[COFFEE3_CONFIG_STORAGE_REGISTER] =
+		usCoffee3ConfigStorageMask();
 	memset(s_ausStatusRegisters, 0,
 		sizeof(s_ausStatusRegisters));
 	memset(s_ausUpgradeRegisters, 0,
@@ -647,6 +650,15 @@ void vCoffee3ServerSelectStorage(uint16_t usStorage)
 }
 
 /*-----------------------------------------------------------*/
+void vCoffee3ServerSelectOutlet(void)
+{
+	taskENTER_CRITICAL();
+	s_ausCommandRegisters[COFFEE3_REG_ONLINE_OUTPUT] = 1U;
+	s_ausCommandRegisters[0x0033U] = 1U;
+	taskEXIT_CRITICAL();
+}
+
+/*-----------------------------------------------------------*/
 void vCoffee3ServerFinishRequest(uint8_t ucStoragePickup)
 {
 	taskENTER_CRITICAL();
@@ -834,15 +846,157 @@ static nmbs_error prvWriteMultiple(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+static nmbs_error prvRejectCommand(uint16_t usAddress, uint16_t usValue,
+	const char *pcReason, nmbs_error xException)
+{
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+		COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+		"Command rejected: address=%u value=%u; %s",
+		(unsigned int)usAddress, (unsigned int)usValue, pcReason);
+	return xException;
+}
+
+/* Explicit product write contract; readable space is not writable support. */
+static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
+	uint8_t ucOrderPadding)
+{
+	const char *pcReason;
+
+	if ((usAddress <= 0x0014U) && (usAddress != 6U) &&
+		((usAddress <= 0x000EU) || (usAddress >= 0x0013U))) {
+		return NMBS_ERROR_NONE;
+	}
+	if ((ucOrderPadding != 0U) && (usValue == 0U) &&
+		((usAddress == 6U) ||
+		((usAddress >= 0x000FU) && (usAddress <= 0x0012U)) ||
+		((usAddress >= 0x0015U) && (usAddress < COFFEE3_ORDER_REGISTER_COUNT) &&
+		(usAddress != 0x001AU)))) {
+		return NMBS_ERROR_NONE;
+	}
+	switch (usAddress) {
+	case 0x001AU: case 0x0021U: case 0x0022U: case 0x0033U:
+	case 0x0047U: case 0x0061U: case 0x0062U: case 0x0063U:
+	case 0x0070U: case 0x0071U:
+	case 0x0080U: case 0x0081U: case 0x0082U: case 0x0083U:
+	case 0x00A2U: case 0x00A3U: case 0x00A4U:
+	case 0x0200U: case 0x0201U: case 0x0202U:
+	case 0x0208U: case 0x0209U:
+		return NMBS_ERROR_NONE;
+	case 0x0030U:
+		if (usValue <= 9U) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x0031U:
+		if ((usValue <= 9U) || ((usValue >= 11U) && (usValue <= 13U)) ||
+			(usValue == 15U) || (usValue == 17U) ||
+			(usValue == 21U) || (usValue == 22U)) { return NMBS_ERROR_NONE; }
+		return prvRejectCommand(usAddress, usValue,
+			"robot position is not supported by Coffee3Close",
+			NMBS_EXCEPTION_ILLEGAL_DATA_VALUE);
+	case 0x0040U:
+		if (usValue <= COFFEE3_COFFEE_RECIPE_MAX) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x0042U:
+		if (usValue <= 6U) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x0050U: case 0x0060U:
+		if (usValue <= 3U) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x0092U:
+		if (usValue <= 2U) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x009DU:
+		if (usValue <= 1U) { return NMBS_ERROR_NONE; }
+		break;
+	case 0x00A1U:
+		if ((usValue == 0U) || (usValue == 1U) || (usValue == 0x10U)) {
+			return NMBS_ERROR_NONE;
+		}
+		break;
+	default:
+		pcReason = "command is not supported by Coffee3Close";
+		if (usAddress == 0x0091U) {
+			pcReason = "outlet lift is not installed";
+		} else if ((usAddress >= 0x0099U) && (usAddress <= 0x009CU)) {
+			pcReason = "outlet 2 is not installed";
+		} else if (usAddress == 0x0093U) {
+			pcReason = "outlet fan is not supported";
+		} else if (usAddress == 0x0094U) {
+			pcReason = "outlet light is not supported";
+		} else if (usAddress == 0x0032U) {
+			pcReason = "storage selector is read-only";
+		}
+		return prvRejectCommand(usAddress, usValue, pcReason,
+			NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
+	}
+	return prvRejectCommand(usAddress, usValue, "invalid command value",
+		NMBS_EXCEPTION_ILLEGAL_DATA_VALUE);
+}
+
 static nmbs_error prvCommitWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
 	uint32_t ulEndAddress;
+	uint16_t usIndex;
+	uint8_t ucRobotMotionAccepted;
+	nmbs_error xValidation;
 
 	if ((pusRegisters == NULL) || (usQuantity == 0U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
 	}
 	ulEndAddress = (uint32_t)usAddress + usQuantity;
+	if (ulEndAddress > 0x10000UL) {
+		return prvRejectCommand(usAddress, pusRegisters[0],
+			"address range overflow", NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
+	}
+	/* Validate the entire FC16 request before any register or device changes. */
+	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
+		xValidation = prvValidateHostWrite((uint16_t)(usAddress + usIndex),
+			pusRegisters[usIndex], ((usQuantity > 1U) &&
+			(ulEndAddress <= COFFEE3_ORDER_REGISTER_COUNT)) ? 1U : 0U);
+		if (xValidation != NMBS_ERROR_NONE) { return xValidation; }
+	}
+	ucRobotMotionAccepted = 0U;
+	/* Reserve before acknowledging FC06/FC16. A full pending slot must not
+	 * appear to the host as a successfully accepted second motion. */
+	if ((usAddress <= 0x0031U) && (ulEndAddress > 0x0031U)) {
+		if (prvSubmitRobotPosition(pusRegisters[0x0031U - usAddress]) == 0U) {
+			return prvRejectCommand(0x0031U, pusRegisters[0x0031U - usAddress],
+				"robot debug pending slot busy or device not ready",
+				NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
+		}
+		ucRobotMotionAccepted = 1U;
+	}
+	if ((usAddress == 0x0092U) || (usAddress == 0x009DU)) {
+		if (usQuantity != 1U) {
+			return prvRejectCommand(usAddress, pusRegisters[0],
+				"door command requires a separate write", NMBS_EXCEPTION_ILLEGAL_DATA_VALUE);
+		}
+		if (pusRegisters[0] == 0U) { return NMBS_ERROR_NONE; }
+		if (ucCoffee3WorkflowInitializationComplete() == 0U) {
+			return prvRejectCommand(usAddress, pusRegisters[0],
+				"initialization incomplete", NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
+		}
+		if (xCoffee3WorkflowSubmitDoorDebug((usAddress == 0x009DU) ? 0U :
+			(pusRegisters[0] == 1U) ? 2U : 1U) != pdPASS) {
+			return prvRejectCommand(usAddress, pusRegisters[0],
+				"door request pending", NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
+		}
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+			"Door %s command accepted: address=%u value=%u",
+			(usAddress == 0x009DU) ? "STOP" : (pusRegisters[0] == 1U) ? "OPEN" : "CLOSE",
+			(unsigned int)usAddress, (unsigned int)pusRegisters[0]);
+		return NMBS_ERROR_NONE;
+	}
+	/* Robot acknowledgement updates data only, without dispatching a task. */
+	if ((usQuantity == 1U) && ((usAddress == 0x0033U) ||
+		((usAddress == COFFEE3_REG_ONLINE_OUTPUT) &&
+		(pusRegisters[0] == 0U)))) {
+		taskENTER_CRITICAL();
+		s_ausCommandRegisters[usAddress] = pusRegisters[0];
+		taskEXIT_CRITICAL();
+		return NMBS_ERROR_NONE;
+	}
 	if (((uint32_t)usAddress <= COFFEE3_SERVER_REMOVED_IO_DEBUG_LAST) &&
 		(ulEndAddress > COFFEE3_SERVER_REMOVED_IO_DEBUG_FIRST)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
@@ -871,15 +1025,31 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 	s_ucOtaRejectLogged = 0U;
 	if (((uint32_t)usAddress + usQuantity) <=
 		COFFEE3_SERVER_COMMAND_COUNT) {
-		/* Storage selection belongs to the robot transaction, not host writes. */
+		/* Keep storage selection protected; outlet selection accepts write-back. */
 		if ((usAddress <= 0x0032U) && (ulEndAddress > 0x0032U)) {
 			return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
+		}
+		/* Persist before publishing registers or dispatching this request. */
+		if ((usAddress <= COFFEE3_CONFIG_STORAGE_REGISTER) &&
+			(ulEndAddress > COFFEE3_CONFIG_STORAGE_REGISTER)) {
+			if (xCoffee3ConfigSetStorageMask(pusRegisters[
+				COFFEE3_CONFIG_STORAGE_REGISTER - usAddress]) != CONFIG_STORE_OK) {
+				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+			}
 		}
 		taskENTER_CRITICAL();
 		memcpy(&s_ausCommandRegisters[usAddress], pusRegisters,
 			(size_t)usQuantity * sizeof(uint16_t));
+		if (ucRobotMotionAccepted != 0U) {
+			s_ausCommandRegisters[0x0031U] = 0U;
+		}
 		taskEXIT_CRITICAL();
-		prvEvaluateOrder();
+		/* A configuration-only range must not retry a previously staged order. */
+		if ((usAddress <= COFFEE3_REG_SYRUP_4) ||
+			(usAddress > COFFEE3_CONFIG_STORAGE_REGISTER) ||
+			(ulEndAddress <= COFFEE3_CONFIG_STORAGE_REGISTER)) {
+			prvEvaluateOrder();
+		}
 		prvEvaluateManualCommands(usAddress, usQuantity);
 		return NMBS_ERROR_NONE;
 	}
@@ -1102,12 +1272,6 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 			s_ausCommandRegisters[0x0030U] = 0U;
 		}
 	}
-	if ((usAddress <= 0x0031U) && (ulEndAddress > 0x0031U)) {
-		usValue = s_ausCommandRegisters[0x0031U];
-		if (prvSubmitRobotPosition(usValue) != 0U) {
-			s_ausCommandRegisters[0x0031U] = 0U;
-		}
-	}
 	if ((usAddress <= 0x0040U) && (ulEndAddress > 0x0040U) &&
 		(s_ausCommandRegisters[0x0040U] <= COFFEE3_COFFEE_RECIPE_MAX) &&
 		(prvSubmitManual(COFFEE3_DEVICE_COFFEE_MACHINE,
@@ -1307,10 +1471,8 @@ static uint8_t prvSubmitRobotPosition(uint16_t usPosition)
 	case 0x0009U:
 		xAction = COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_1;
 		break;
-	case 0x000AU:
-		xAction = COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_2;
-		break;
 	case 0x000BU:
+	case 0x0011U:
 		xAction = COFFEE3_ACTION_ROBOT_PUT_OUTPUT;
 		usParameter = 1U;
 		break;
@@ -1320,12 +1482,13 @@ static uint8_t prvSubmitRobotPosition(uint16_t usPosition)
 	case 0x000DU:
 		xAction = COFFEE3_ACTION_ROBOT_COVER_LID;
 		break;
-	case 0x000EU:
-		xAction = COFFEE3_ACTION_ROBOT_PUT_OUTPUT;
-		usParameter = 2U;
-		break;
 	case 0x000FU:
 		xAction = COFFEE3_ACTION_ROBOT_TAKE_COFFEE;
+		break;
+	case 0x0015U:
+	case 0x0016U:
+		xAction = COFFEE3_ACTION_ROBOT_PUT_STORAGE;
+		usParameter = (uint16_t)(usPosition - 0x0014U);
 		break;
 	default:
 		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
@@ -1382,13 +1545,20 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	if (xCoffee3CommandSubmitUrgent(&xCommand, pdMS_TO_TICKS(100U)) != pdPASS) {
 		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			"DEBUG_COMMAND_QUEUE_FULL: command not enqueued",
+			((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
+			 (xAction > COFFEE3_ACTION_ROBOT_MANUAL_MODE) &&
+			 (xAction != COFFEE3_ACTION_REFRESH)) ?
+				"Robot debug rejected: pending slot busy or admission gate closed" :
+				"DEBUG_COMMAND_QUEUE_FULL: command not enqueued",
 			-1, "action", (int32_t)xAction);
 		return 0U;
 	}
 	(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
 		COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-		"MANUAL_COMMAND_ACCEPTED",
+		((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
+		 (xAction > COFFEE3_ACTION_ROBOT_MANUAL_MODE)) ?
+			"Robot debug queued; wait for order/pickup business release" :
+			"MANUAL_COMMAND_ACCEPTED",
 		0, "action", (int32_t)xAction);
 	return 1U;
 }

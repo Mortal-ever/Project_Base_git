@@ -7,7 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class ManualPriorityContracts(unittest.TestCase):
     def test_both_targets_use_source_not_log_id_for_priority(self):
-        for number, folder in ((2, "Coffee2App"), (3, "Coffee3CloseApp")):
+        for number, folder in ((2, "Coffee2OpenApp"), (3, "Coffee3CloseApp")):
             with self.subTest(target=folder):
                 app = ROOT / "Application/UserAPP" / folder
                 device = (app / f"Device/coffee{number}_device.c").read_text(
@@ -25,7 +25,7 @@ class ManualPriorityContracts(unittest.TestCase):
                 self.assertIn("WorkflowReleaseManual()", submit)
 
     def test_status_waiting_is_system_log_only(self):
-        for number, folder in ((2, "Coffee2App"), (3, "Coffee3CloseApp")):
+        for number, folder in ((2, "Coffee2OpenApp"), (3, "Coffee3CloseApp")):
             app = ROOT / "Application/UserAPP" / folder
             robot = (app / f"Robot_Tcp/coffee{number}_robot_tcp.c").read_text(
                 encoding="utf-8-sig")

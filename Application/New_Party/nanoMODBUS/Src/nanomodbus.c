@@ -30,6 +30,32 @@
 #include <stdint.h>
 #include <string.h>
 
+/*
+ * ============================================================================
+ * 中文学习注释版说明
+ * ============================================================================
+ * 本文件在原 nanoMODBUS 实现基础上增加中文阅读注释，不改变协议逻辑。
+ *
+ * 阅读时可以把源码分成 6 层：
+ *
+ *   1) get/put/set/get_n 等          : 消息缓冲区与游标操作
+ *   2) recv/send                     : nanoMODBUS 与平台 read/write 的边界
+ *   3) msg/header/footer             : RTU/TCP ADU 公共封装与校验
+ *   4) recv_xxx_res                  : Client 响应解析
+ *   5) handle_xxx                    : Server 请求解析与 callback 分发
+ *   6) nmbs_xxx 公共 API             : Client/Server 对外接口
+ *
+ * 最核心的数据结构是 nmbs->msg.buf + nmbs->msg.buf_idx：
+ *   - put_xxx()  顺序构造报文，并推进 buf_idx
+ *   - get_xxx()  顺序解析报文，并推进 buf_idx
+ *   - set_xxx()  定点回写字段，不推进 buf_idx
+ *
+ * 平台边界：
+ *   nanoMODBUS -> platform.read/write/flush/crc_calc -> 项目 Transport/UART/TCP
+ * ============================================================================
+ */
+
+
 #define NMBS_UNUSED_PARAM(x) ((x) = (x))
 
 #ifdef NMBS_DEBUG
@@ -40,19 +66,42 @@
 #endif
 
 
+
+/* ========================================================================== */
+/* 消息缓冲区基础编解码工具 */
+/* ========================================================================== */
+
+/**
+ * @brief 从当前消息游标位置读取 1 个字节。
+ *
+ * 读取 msg.buf[buf_idx] 后将 buf_idx 加 1。
+ * 这是 nanoMODBUS 最基础的“顺序解析”操作之一。
+ */
 static uint8_t get_1(nmbs_t* nmbs) {
     uint8_t result = nmbs->msg.buf[nmbs->msg.buf_idx];
+    // 顺序读取后推进游标，下一次 get_xxx() 会从下一个字段继续解析。
     nmbs->msg.buf_idx++;
     return result;
 }
 
 
+/**
+ * @brief 向当前消息游标位置写入 1 个字节。
+ *
+ * 写入 msg.buf[buf_idx] 后将 buf_idx 加 1。
+ * 用于按顺序构造 Modbus 报文。
+ */
 static void put_1(nmbs_t* nmbs, uint8_t data) {
     nmbs->msg.buf[nmbs->msg.buf_idx] = data;
     nmbs->msg.buf_idx++;
 }
 
 
+/**
+ * @brief 跳过当前消息中的 1 个字节。
+ *
+ * 不读取数据，只推进 buf_idx。
+ */
 static void discard_1(nmbs_t* nmbs) {
     nmbs->msg.buf_idx++;
 }
@@ -60,6 +109,11 @@ static void discard_1(nmbs_t* nmbs) {
 
 #ifndef NMBS_SERVER_DISABLED
 #if !defined(NMBS_SERVER_READ_FILE_RECORD_DISABLED) || !defined(NMBS_SERVER_WRITE_FILE_RECORD_DISABLED)
+/**
+ * @brief 跳过当前消息中的 n 个字节。
+ *
+ * 不复制、不解析数据，只把 buf_idx 向后移动 n。
+ */
 static void discard_n(nmbs_t* nmbs, uint16_t n) {
     nmbs->msg.buf_idx += n;
 }
@@ -67,6 +121,13 @@ static void discard_n(nmbs_t* nmbs, uint16_t n) {
 #endif
 
 
+/**
+ * @brief 从当前消息位置读取一个 16 位值。
+ *
+ * Modbus 多字节字段采用高字节在前的顺序：
+ *     buf[i] buf[i+1] = 0x12 0x34  ->  0x1234
+ * 读取完成后 buf_idx += 2。
+ */
 static uint16_t get_2(nmbs_t* nmbs) {
     const uint16_t result =
             ((uint16_t) nmbs->msg.buf[nmbs->msg.buf_idx]) << 8 | (uint16_t) nmbs->msg.buf[nmbs->msg.buf_idx + 1];
@@ -75,20 +136,40 @@ static uint16_t get_2(nmbs_t* nmbs) {
 }
 
 
+/**
+ * @brief 将一个 16 位值按高字节在前写入消息缓冲区。
+ *
+ * 例如 0x1234 会写成两个字节：0x12 0x34。
+ * 写入完成后 buf_idx += 2。
+ */
 static void put_2(nmbs_t* nmbs, uint16_t data) {
     nmbs->msg.buf[nmbs->msg.buf_idx] = (uint8_t) ((data >> 8) & 0xFFU);
+    // 强转为 uint8_t 会保留 data 的低 8 位。
     nmbs->msg.buf[nmbs->msg.buf_idx + 1] = (uint8_t) data;
+    // 一个 16 位字段占 2 个字节，因此游标向后移动 2。
     nmbs->msg.buf_idx += 2;
 }
 
 
 #ifndef NMBS_SERVER_DISABLED
 #ifndef NMBS_SERVER_READ_DEVICE_IDENTIFICATION_DISABLED
+/**
+ * @brief 在消息缓冲区指定 index 位置写入 1 个字节。
+ *
+ * 与 put_1() 不同：本函数不会修改 buf_idx。
+ * 适合报文基本构造完成后“回头修改”固定字段。
+ */
 static void set_1(nmbs_t* nmbs, uint8_t data, uint8_t index) {
     nmbs->msg.buf[index] = data;
 }
 
 
+/**
+ * @brief 在指定 index 位置写入一个 16 位大端值。
+ *
+ * 与 put_2() 不同：不会推进 buf_idx。
+ * 典型用途是回填 Modbus TCP MBAP 的 Length 字段。
+ */
 static void set_2(nmbs_t* nmbs, uint16_t data, uint8_t index) {
     nmbs->msg.buf[index] = (uint8_t) ((data >> 8) & 0xFFU);
     nmbs->msg.buf[index + 1] = (uint8_t) data;
@@ -97,8 +178,16 @@ static void set_2(nmbs_t* nmbs, uint16_t data, uint8_t index) {
 #endif
 
 
+/**
+ * @brief 取得当前游标开始的连续 n 字节区域。
+ *
+ * 不执行 memcpy；返回的是 msg.buf 内部地址。
+ * 返回后 buf_idx += n，因此本质是“取得这一段并消费它”。
+ */
 static uint8_t* get_n(nmbs_t* nmbs, uint16_t n) {
+    // 这里只取得内部 buffer 的地址，不复制数据。
     uint8_t* msg_buf_ptr = nmbs->msg.buf + nmbs->msg.buf_idx;
+    // 将这一段视为已被“消费”。
     nmbs->msg.buf_idx += n;
     return msg_buf_ptr;
 }
@@ -106,6 +195,11 @@ static uint8_t* get_n(nmbs_t* nmbs, uint16_t n) {
 
 #ifndef NMBS_SERVER_DISABLED
 #ifndef NMBS_SERVER_READ_DEVICE_IDENTIFICATION_DISABLED
+/**
+ * @brief 将连续 size 个字节复制到当前消息缓冲区。
+ *
+ * 使用 memcpy() 批量写入，完成后 buf_idx += size。
+ */
 static void put_n(nmbs_t* nmbs, const uint8_t* data, uint8_t size) {
     memcpy(&nmbs->msg.buf[nmbs->msg.buf_idx], data, size);
     nmbs->msg.buf_idx += size;
@@ -114,6 +208,16 @@ static void put_n(nmbs_t* nmbs, const uint8_t* data, uint8_t size) {
 
 
 #ifndef NMBS_SERVER_WRITE_FILE_RECORD_DISABLED
+/**
+ * @brief 从消息缓冲区取得 n 个 16 位寄存器，并进行字节交换。
+ *
+ * 该实现直接把 uint8_t 缓冲区转换为 uint16_t*，随后对每个寄存器
+ * 交换高低字节，使其从 Modbus 字节序转换为本机可用的 uint16_t。
+ * 同时 buf_idx += n * 2。
+ *
+ * 注意：这种直接的 uint16_t* 强制转换依赖内存对齐/别名规则，
+ * 可移植性不如逐字节的 get_2()。
+ */
 static uint16_t* get_regs(nmbs_t* nmbs, uint16_t n) {
     uint16_t* msg_buf_ptr = (uint16_t*) (nmbs->msg.buf + nmbs->msg.buf_idx);
     nmbs->msg.buf_idx += n * 2;
@@ -127,6 +231,12 @@ static uint16_t* get_regs(nmbs_t* nmbs, uint16_t n) {
 
 
 #ifndef NMBS_CLIENT_DISABLED
+/**
+ * @brief 将 n 个 uint16_t 寄存器批量写入消息缓冲区。
+ *
+ * 写入前对每个寄存器交换高低字节，使缓冲区中的字节排列符合
+ * Modbus 高字节在前的格式；buf_idx += n * 2。
+ */
 static void put_regs(nmbs_t* nmbs, const uint16_t* data, uint16_t n) {
     uint16_t* msg_buf_ptr = (uint16_t*) (nmbs->msg.buf + nmbs->msg.buf_idx);
     nmbs->msg.buf_idx += n * 2;
@@ -137,6 +247,11 @@ static void put_regs(nmbs_t* nmbs, const uint16_t* data, uint16_t n) {
 #endif
 
 
+/**
+ * @brief 批量交换 uint16_t 数组中每个元素的高、低 8 位。
+ *
+ * 例如：0x1234 -> 0x3412。再次调用可恢复原值。
+ */
 static void swap_regs(uint16_t* data, uint16_t n) {
     while (n--) {
         data[n] = (data[n] << 8) | ((data[n] >> 8) & 0xFF);
@@ -144,6 +259,23 @@ static void swap_regs(uint16_t* data, uint16_t n) {
 }
 
 
+
+/* ========================================================================== */
+/* 平台收发适配层 */
+/* ========================================================================== */
+
+/**
+ * @brief 从平台 read() 回调精确接收 count 个字节。
+ *
+ * 返回值映射规则：
+ *   ret == count       -> NMBS_ERROR_NONE
+ *   0 <= ret < count   -> NMBS_ERROR_TIMEOUT
+ *   ret < 0            -> NMBS_ERROR_TRANSPORT
+ *   ret > count        -> NMBS_ERROR_TRANSPORT
+ *
+ * 对 TCP：如果 msg.complete 已置位，说明整帧已经提前收进 msg.buf，
+ * 后续解析阶段无需再次访问底层传输。
+ */
 static nmbs_error recv(nmbs_t* nmbs, uint16_t count) {
     if (nmbs->msg.complete) {
         return NMBS_ERROR_NONE;
@@ -156,10 +288,12 @@ static nmbs_error recv(nmbs_t* nmbs, uint16_t count) {
     const int32_t ret =
             nmbs->platform.read(nmbs->msg.buf + nmbs->msg.buf_idx, count, nmbs->byte_timeout_ms, nmbs->platform.arg);
 
+    // nanoMODBUS 要求平台层尽量完成“精确 count 字节”收/发。
     if (ret == count)
         return NMBS_ERROR_NONE;
 
     if (ret < count) {
+        // 负值代表底层 I/O 真正失败；非负但不足 count 代表超时/部分完成。
         if (ret < 0)
             return NMBS_ERROR_TRANSPORT;
 
@@ -170,13 +304,21 @@ static nmbs_error recv(nmbs_t* nmbs, uint16_t count) {
 }
 
 
+/**
+ * @brief 通过平台 write() 回调发送 count 个字节。
+ *
+ * 与 recv() 使用相同的返回值约定：
+ * 完整发送才算成功，部分发送视为超时，负值视为传输错误。
+ */
 static nmbs_error send(const nmbs_t* nmbs, uint16_t count) {
     const int32_t ret = nmbs->platform.write(nmbs->msg.buf, count, nmbs->byte_timeout_ms, nmbs->platform.arg);
 
+    // nanoMODBUS 要求平台层尽量完成“精确 count 字节”收/发。
     if (ret == count)
         return NMBS_ERROR_NONE;
 
     if (ret < count) {
+        // 负值代表底层 I/O 真正失败；非负但不足 count 代表超时/部分完成。
         if (ret < 0)
             return NMBS_ERROR_TRANSPORT;
 
@@ -187,17 +329,39 @@ static nmbs_error send(const nmbs_t* nmbs, uint16_t count) {
 }
 
 
+/**
+ * @brief nanoMODBUS 默认的接收缓冲清理实现。
+ *
+ * 使用 byte_timeout_ms = 0 调用平台 read()，即执行一次非阻塞读取，
+ * 将当前可读的残留数据丢弃。项目可以通过 platform.flush 覆盖它。
+ */
 static void flush(nmbs_t* nmbs, void* arg) {
     NMBS_UNUSED_PARAM(arg);
     nmbs->platform.read(nmbs->msg.buf, sizeof(nmbs->msg.buf), 0, nmbs->platform.arg);
 }
 
 
+
+/* ========================================================================== */
+/* 消息状态管理 */
+/* ========================================================================== */
+
+/**
+ * @brief 仅重置消息缓冲区游标。
+ *
+ * 不清空 buf 内容，因为后续写入/解析只依赖 buf_idx 指示的有效区域。
+ */
 static void msg_buf_reset(nmbs_t* nmbs) {
     nmbs->msg.buf_idx = 0;
 }
 
 
+/**
+ * @brief 重置当前报文的解析/构造状态。
+ *
+ * 除 buf_idx 外，同时清除 Unit ID、功能码、Transaction ID，
+ * 以及 broadcast / ignored / complete 等状态标志。
+ */
 static void msg_state_reset(nmbs_t* nmbs) {
     msg_buf_reset(nmbs);
     nmbs->msg.unit_id = 0;
@@ -210,6 +374,16 @@ static void msg_state_reset(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_CLIENT_DISABLED
+/**
+ * @brief 开始一笔新的 Client 请求。
+ *
+ * 主要步骤：
+ *   1. 生成新的 TCP Transaction ID；
+ *   2. flush 掉链路上的残留数据；
+ *   3. 重置消息状态；
+ *   4. 设置目标 Unit ID、功能码和 Transaction ID；
+ *   5. RTU Unit ID=0 时标记为广播。
+ */
 static void msg_state_req(nmbs_t* nmbs, uint8_t fc) {
     if (nmbs->current_tid == UINT16_MAX)
         nmbs->current_tid = 1;
@@ -217,6 +391,7 @@ static void msg_state_req(nmbs_t* nmbs, uint8_t fc) {
         nmbs->current_tid++;
 
     // Flush the remaining data on the line before sending the request
+    // 新请求开始前清理旧数据，避免上一帧残留污染本次响应。
     nmbs->platform.flush(nmbs, nmbs->platform.arg);
 
     msg_state_reset(nmbs);
@@ -229,6 +404,19 @@ static void msg_state_req(nmbs_t* nmbs, uint8_t fc) {
 #endif
 
 
+
+/* ========================================================================== */
+/* 实例与平台配置 */
+/* ========================================================================== */
+
+/**
+ * @brief 创建 nanoMODBUS 基础实例。
+ *
+ * 初始化超时默认值，校验 platform_conf 是否有效，
+ * 并把 platform_conf 按值复制到 nmbs->platform。
+ * 因此调用完成后，外部 platform_conf 结构本身可以离开作用域，
+ * 但其中 arg 指向的上下文对象仍必须保持有效。
+ */
 nmbs_error nmbs_create(nmbs_t* nmbs, const nmbs_platform_conf* platform_conf) {
     if (!nmbs)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -247,22 +435,40 @@ nmbs_error nmbs_create(nmbs_t* nmbs, const nmbs_platform_conf* platform_conf) {
     if (!platform_conf->read || !platform_conf->write)
         return NMBS_ERROR_INVALID_ARGUMENT;
 
+    // 按值复制配置结构；不是保存 platform_conf 指针。
     nmbs->platform = *platform_conf;
 
     return NMBS_ERROR_NONE;
 }
 
 
+/**
+ * @brief 设置“等待首字节/响应开始”的超时时间。
+ *
+ * Client 中主要用于等待响应首字节；
+ * Server 中用于 nmbs_server_poll() 等待新请求。
+ */
 void nmbs_set_read_timeout(nmbs_t* nmbs, int32_t timeout_ms) {
     nmbs->read_timeout_ms = timeout_ms;
 }
 
 
+/**
+ * @brief 设置报文后续字节之间的超时时间。
+ *
+ * 首字节通常使用 read_timeout_ms；首字节到达后恢复使用该值。
+ */
 void nmbs_set_byte_timeout(nmbs_t* nmbs, int32_t timeout_ms) {
     nmbs->byte_timeout_ms = timeout_ms;
 }
 
 
+/**
+ * @brief 初始化平台适配配置。
+ *
+ * 设置默认 CRC、默认 flush，并写入 initialized 魔数。
+ * read/write/transport 仍需由上层平台代码提供。
+ */
 void nmbs_platform_conf_create(nmbs_platform_conf* platform_conf) {
     memset(platform_conf, 0, sizeof(nmbs_platform_conf));
     platform_conf->crc_calc = nmbs_crc_calc;
@@ -272,16 +478,35 @@ void nmbs_platform_conf_create(nmbs_platform_conf* platform_conf) {
 }
 
 
+/**
+ * @brief 设置 Client 下一次请求的目标 Unit ID。
+ *
+ * 名字保留了 RTU 历史语义；该字段也会用于构造 TCP MBAP 的 Unit Identifier。
+ */
 void nmbs_set_destination_rtu_address(nmbs_t* nmbs, uint8_t address) {
     nmbs->dest_address_rtu = address;
 }
 
 
+/**
+ * @brief 修改平台 read/write/flush/crc 回调收到的用户上下文指针。
+ */
 void nmbs_set_platform_arg(nmbs_t* nmbs, void* arg) {
     nmbs->platform.arg = arg;
 }
 
 
+
+/* ========================================================================== */
+/* RTU CRC 与 RTU/TCP 报文封装 */
+/* ========================================================================== */
+
+/**
+ * @brief 计算 Modbus RTU CRC16。
+ *
+ * 内部使用多项式 0xA001。函数最后交换 CRC 的高低字节，
+ * 使其配合统一的 put_2() 后得到 RTU 线上所需的 CRC 字节顺序。
+ */
 uint16_t nmbs_crc_calc(const uint8_t* data, uint32_t length, void* arg) {
     NMBS_UNUSED_PARAM(arg);
     uint16_t crc = 0xFFFF;
@@ -300,6 +525,12 @@ uint16_t nmbs_crc_calc(const uint8_t* data, uint32_t length, void* arg) {
     return (uint16_t) (crc << 8) | (uint16_t) (crc >> 8);
 }
 
+/**
+ * @brief 接收并校验报文尾部。
+ *
+ * RTU：继续接收 2 字节 CRC，并与本地计算值比较。
+ * TCP：没有 CRC 尾部，因此直接成功。
+ */
 static nmbs_error recv_msg_footer(nmbs_t* nmbs) {
     NMBS_DEBUG_PRINT("\n");
 
@@ -319,9 +550,19 @@ static nmbs_error recv_msg_footer(nmbs_t* nmbs) {
 }
 
 
+/**
+ * @brief 接收并解析一帧 RTU/TCP 报文头。
+ *
+ * 首字节使用 read_timeout_ms 等待；收到首字节后恢复 byte_timeout_ms。
+ *
+ * RTU：读取 Unit ID + Function Code。
+ * TCP：解析 MBAP（Transaction ID、Protocol ID、Length、Unit ID、FC），
+ *      根据 Length 一次性把剩余数据接收进 msg.buf，并置 complete=true。
+ */
 static nmbs_error recv_msg_header(nmbs_t* nmbs, bool* first_byte_received) {
     // We wait for the read timeout here, just for the first message byte
     int32_t old_byte_timeout = nmbs->byte_timeout_ms;
+    // 仅等待“报文第一个字节”时临时使用 read_timeout。
     nmbs->byte_timeout_ms = nmbs->read_timeout_ms;
 
     msg_state_reset(nmbs);
@@ -331,6 +572,7 @@ static nmbs_error recv_msg_header(nmbs_t* nmbs, bool* first_byte_received) {
     if (nmbs->platform.transport == NMBS_TRANSPORT_RTU) {
         nmbs_error err = recv(nmbs, 1);
 
+        // 首字节已到，后续字节恢复使用 byte_timeout。
         nmbs->byte_timeout_ms = old_byte_timeout;
 
         if (err != NMBS_ERROR_NONE)
@@ -349,6 +591,7 @@ static nmbs_error recv_msg_header(nmbs_t* nmbs, bool* first_byte_received) {
     else if (nmbs->platform.transport == NMBS_TRANSPORT_TCP) {
         nmbs_error err = recv(nmbs, 1);
 
+        // 首字节已到，后续字节恢复使用 byte_timeout。
         nmbs->byte_timeout_ms = old_byte_timeout;
 
         if (err != NMBS_ERROR_NONE)
@@ -383,6 +626,7 @@ static nmbs_error recv_msg_header(nmbs_t* nmbs, bool* first_byte_received) {
         if (protocol_id != 0)
             return NMBS_ERROR_INVALID_TCP_MBAP;
 
+        // TCP 的 MBAP Length 已告诉我们整帧长度，剩余 payload 已全部收进 buf。
         nmbs->msg.complete = true;
     }
 
@@ -390,15 +634,23 @@ static nmbs_error recv_msg_header(nmbs_t* nmbs, bool* first_byte_received) {
 }
 
 
+/**
+ * @brief 根据 RTU/TCP 类型构造公共报文头。
+ *
+ * RTU：Unit ID + Function Code。
+ * TCP：Transaction ID + Protocol ID(0) + Length + Unit ID + Function Code。
+ * data_length 表示功能码之后的数据长度。
+ */
 static void put_msg_header(nmbs_t* nmbs, uint16_t data_length) {
     msg_buf_reset(nmbs);
-
+    // RTU/TCP 报文头的分支处理
     if (nmbs->platform.transport == NMBS_TRANSPORT_RTU) {
         put_1(nmbs, nmbs->msg.unit_id);
     }
     else if (nmbs->platform.transport == NMBS_TRANSPORT_TCP) {
         put_2(nmbs, nmbs->msg.transaction_id);
         put_2(nmbs, 0);
+        // MBAP Length = Unit ID(1) + Function Code(1) + PDU Data(data_length)。
         put_2(nmbs, (uint16_t) (1 + 1 + data_length));
         put_1(nmbs, nmbs->msg.unit_id);
     }
@@ -409,9 +661,15 @@ static void put_msg_header(nmbs_t* nmbs, uint16_t data_length) {
 
 #ifndef NMBS_SERVER_DISABLED
 #ifndef NMBS_SERVER_READ_DEVICE_IDENTIFICATION_DISABLED
+/**
+ * @brief 回填 Modbus TCP MBAP 中的 Length 字段。
+ *
+ * Length 位于 buf[4..5]，因此使用 set_2() 定点修改而不改变 buf_idx。
+ */
 static void set_msg_header_size(nmbs_t* nmbs, uint16_t data_length) {
     if (nmbs->platform.transport == NMBS_TRANSPORT_TCP) {
         data_length += 2;
+        // MBAP Length 字段固定在偏移 4~5，因此使用 set_2() 回填。
         set_2(nmbs, data_length, 4);
     }
 }
@@ -419,6 +677,12 @@ static void set_msg_header_size(nmbs_t* nmbs, uint16_t data_length) {
 #endif
 
 
+/**
+ * @brief 发送当前已经构造完成的消息。
+ *
+ * RTU 在发送前自动计算并追加 CRC；
+ * TCP 不追加 CRC。最终统一调用 send()。
+ */
 static nmbs_error send_msg(nmbs_t* nmbs) {
     NMBS_DEBUG_PRINT("\n");
 
@@ -434,6 +698,12 @@ static nmbs_error send_msg(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_DISABLED
+/**
+ * @brief Server 侧接收请求头并判断该 RTU 请求是否属于本机。
+ *
+ * Unit ID=0 标记为广播；
+ * Unit ID 与本机地址不匹配则标记 ignored，仍会完成报文消费但不执行业务。
+ */
 static nmbs_error recv_req_header(nmbs_t* nmbs, bool* first_byte_received) {
     const nmbs_error err = recv_msg_header(nmbs, first_byte_received);
     if (err != NMBS_ERROR_NONE)
@@ -453,12 +723,23 @@ static nmbs_error recv_req_header(nmbs_t* nmbs, bool* first_byte_received) {
 }
 
 
+/**
+ * @brief Server 侧构造正常响应头。
+ *
+ * 实际封装由 put_msg_header() 完成，本函数主要表达“这是响应”的语义。
+ */
 static void put_res_header(nmbs_t* nmbs, uint16_t data_length) {
     put_msg_header(nmbs, data_length);
     NMBS_DEBUG_PRINT("%d NMBS res -> address_rtu %d\tfc %d\t", nmbs->address_rtu, nmbs->address_rtu, nmbs->msg.fc);
 }
 
 
+/**
+ * @brief Server 发送 Modbus Exception Response。
+ *
+ * 异常响应的功能码 = 原功能码 + 0x80，随后携带 1 字节异常码。
+ * RTU 广播请求不允许返回响应，因此广播时直接成功返回。
+ */
 static nmbs_error send_exception_msg(nmbs_t* nmbs, uint8_t exception) {
     if (nmbs->msg.broadcast) {
         return NMBS_ERROR_NONE;
@@ -475,6 +756,15 @@ static nmbs_error send_exception_msg(nmbs_t* nmbs, uint8_t exception) {
 #endif
 
 
+/**
+ * @brief Client 侧接收并验证响应头。
+ *
+ * 会保存请求的 TID/Unit ID/FC，然后接收响应并检查：
+ *   - TCP Transaction ID 是否匹配；
+ *   - RTU Unit ID 是否匹配；
+ *   - Function Code 是否匹配；
+ *   - FC+0x80 时解析 Modbus Exception。
+ */
 static nmbs_error recv_res_header(nmbs_t* nmbs) {
     const uint16_t req_transaction_id = nmbs->msg.transaction_id;
     const uint8_t req_unit_id = nmbs->msg.unit_id;
@@ -509,6 +799,7 @@ static nmbs_error recv_res_header(nmbs_t* nmbs) {
 
             NMBS_DEBUG_PRINT("%d NMBS res <- address_rtu %d\texception %d\n", nmbs->address_rtu, nmbs->msg.unit_id,
                              exception);
+            // 正数 1~4 直接作为 nmbs_error 返回，调用者可区分协议异常与通信错误。
             return (nmbs_error) exception;
         }
 
@@ -522,6 +813,11 @@ static nmbs_error recv_res_header(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_CLIENT_DISABLED
+/**
+ * @brief Client 侧构造请求头。
+ *
+ * 实际格式由 put_msg_header() 根据 RTU/TCP 选择。
+ */
 static void put_req_header(nmbs_t* nmbs, uint16_t data_length) {
     put_msg_header(nmbs, data_length);
 #ifdef NMBS_DEBUG
@@ -543,6 +839,17 @@ static void put_req_header(nmbs_t* nmbs, uint16_t data_length) {
 #if !defined(NMBS_CLIENT_DISABLED) ||                                                                                  \
         (!defined(NMBS_SERVER_DISABLED) &&                                                                             \
          (!defined(NMBS_SERVER_READ_COILS_DISABLED) || !defined(NMBS_SERVER_READ_DISCRETE_INPUTS_DISABLED)))
+
+/* ========================================================================== */
+/* Client 响应解析 */
+/* ========================================================================== */
+
+/**
+ * @brief 解析 FC01/FC02 的离散量读取响应。
+ *
+ * 验证响应头，读取 Byte Count，再把打包的 bit 字节复制到 bitfield，
+ * 最后校验 RTU CRC（TCP 则无需 CRC）。
+ */
 static nmbs_error recv_read_discrete_res(nmbs_t* nmbs, nmbs_bitfield values) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -583,6 +890,11 @@ static nmbs_error recv_read_discrete_res(nmbs_t* nmbs, nmbs_bitfield values) {
 #if !defined(NMBS_CLIENT_DISABLED) ||                                                                                  \
         (!defined(NMBS_SERVER_DISABLED) && (!defined(NMBS_SERVER_READ_HOLDING_REGISTERS_DISABLED) ||                   \
                                             !defined(NMBS_SERVER_READ_INPUT_REGISTERS_DISABLED)))
+/**
+ * @brief 解析 FC03/FC04 等“读取寄存器”响应。
+ *
+ * Byte Count 必须等于 quantity * 2；随后使用 get_2() 顺序解析每个寄存器。
+ */
 static nmbs_error recv_read_registers_res(nmbs_t* nmbs, uint16_t quantity, uint16_t* registers) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -595,6 +907,7 @@ static nmbs_error recv_read_registers_res(nmbs_t* nmbs, uint16_t quantity, uint1
     const uint8_t registers_bytes = get_1(nmbs);
     NMBS_DEBUG_PRINT("b %d\t", registers_bytes);
 
+    // 每个寄存器 2 字节；响应 Byte Count 必须与请求数量严格一致。
     if (registers_bytes > 250 || registers_bytes != quantity * 2)
         return NMBS_ERROR_INVALID_RESPONSE;
 
@@ -619,6 +932,11 @@ static nmbs_error recv_read_registers_res(nmbs_t* nmbs, uint16_t quantity, uint1
 #endif
 
 
+/**
+ * @brief 解析 FC05 写单线圈响应。
+ *
+ * 正常响应会回显请求地址和值；两者必须与请求完全一致。
+ */
 nmbs_error recv_write_single_coil_res(nmbs_t* nmbs, uint16_t address, uint16_t value_req) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -647,6 +965,9 @@ nmbs_error recv_write_single_coil_res(nmbs_t* nmbs, uint16_t address, uint16_t v
 }
 
 
+/**
+ * @brief 解析 FC06 写单寄存器响应，并校验地址/值回显。
+ */
 nmbs_error recv_write_single_register_res(nmbs_t* nmbs, uint16_t address, uint16_t value_req) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -674,6 +995,9 @@ nmbs_error recv_write_single_register_res(nmbs_t* nmbs, uint16_t address, uint16
 }
 
 
+/**
+ * @brief 解析 FC15 写多个线圈响应，并校验起始地址/数量回显。
+ */
 nmbs_error recv_write_multiple_coils_res(nmbs_t* nmbs, uint16_t address, uint16_t quantity) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -701,6 +1025,9 @@ nmbs_error recv_write_multiple_coils_res(nmbs_t* nmbs, uint16_t address, uint16_
 }
 
 
+/**
+ * @brief 解析 FC16 写多个寄存器响应，并校验起始地址/数量回显。
+ */
 nmbs_error recv_write_multiple_registers_res(nmbs_t* nmbs, uint16_t address, uint16_t quantity) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -728,6 +1055,11 @@ nmbs_error recv_write_multiple_registers_res(nmbs_t* nmbs, uint16_t address, uin
 }
 
 
+/**
+ * @brief 解析 FC20 Read File Record 响应。
+ *
+ * 验证 Reference Type、记录数量，并将记录数据转换成本机寄存器字节序。
+ */
 nmbs_error recv_read_file_record_res(nmbs_t* nmbs, uint16_t* registers, uint16_t count) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -769,6 +1101,11 @@ nmbs_error recv_read_file_record_res(nmbs_t* nmbs, uint16_t* registers, uint16_t
 }
 
 
+/**
+ * @brief 解析 FC21 Write File Record 响应。
+ *
+ * FC21 正常响应回显请求内容，因此需要比较文件号、记录号、长度和数据。
+ */
 nmbs_error recv_write_file_record_res(nmbs_t* nmbs, uint16_t file_number, uint16_t record_number,
                                       const uint16_t* registers, uint16_t count) {
     nmbs_error err = recv_res_header(nmbs);
@@ -821,6 +1158,12 @@ nmbs_error recv_write_file_record_res(nmbs_t* nmbs, uint16_t file_number, uint16
     return NMBS_ERROR_NONE;
 }
 
+/**
+ * @brief 解析 FC43/MEI 0x0E Read Device Identification 响应。
+ *
+ * 处理 conformity level、More Follows、Next Object ID 和对象列表，
+ * 并把对象字符串拷贝到调用者提供的缓冲区。
+ */
 nmbs_error recv_read_device_identification_res(nmbs_t* nmbs, uint8_t buffers_count, char** buffers_out,
                                                uint8_t buffers_length, const uint8_t* order, uint8_t* ids_out,
                                                uint8_t* next_object_id_out, uint8_t* objects_count_out) {
@@ -907,6 +1250,17 @@ nmbs_error recv_read_device_identification_res(nmbs_t* nmbs, uint8_t buffers_cou
 
 #ifndef NMBS_SERVER_DISABLED
 #if !defined(NMBS_SERVER_READ_COILS_DISABLED) || !defined(NMBS_SERVER_READ_DISCRETE_INPUTS_DISABLED)
+
+/* ========================================================================== */
+/* Server 功能码处理 */
+/* ========================================================================== */
+
+/**
+ * @brief Server 端 FC01/FC02 的共享处理器。
+ *
+ * 解析 address/quantity -> 校验协议范围 -> 调用业务 callback ->
+ * 按 bitfield 打包响应。被忽略的 RTU 地址只消费请求而不执行业务。
+ */
 static nmbs_error handle_read_discrete(nmbs_t* nmbs,
                                        nmbs_error (*callback)(uint16_t, uint16_t, nmbs_bitfield, uint8_t, void*)) {
     nmbs_error err = recv(nmbs, 4);
@@ -933,7 +1287,8 @@ static nmbs_error handle_read_discrete(nmbs_t* nmbs,
             nmbs_bitfield bitfield = {0};
             err = callback(address, quantity, bitfield, nmbs->msg.unit_id, nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -972,6 +1327,12 @@ static nmbs_error handle_read_discrete(nmbs_t* nmbs,
 
 
 #if !defined(NMBS_SERVER_READ_HOLDING_REGISTERS_DISABLED) || !defined(NMBS_SERVER_READ_INPUT_REGISTERS_DISABLED)
+/**
+ * @brief Server 端 FC03/FC04 的共享处理器。
+ *
+ * 解析请求、检查地址和数量、调用寄存器读取 callback，
+ * 然后按 Modbus 大端顺序构造寄存器响应。
+ */
 static nmbs_error handle_read_registers(nmbs_t* nmbs,
                                         nmbs_error (*callback)(uint16_t, uint16_t, uint16_t*, uint8_t, void*)) {
     nmbs_error err = recv(nmbs, 4);
@@ -998,7 +1359,8 @@ static nmbs_error handle_read_registers(nmbs_t* nmbs,
             uint16_t regs[125] = {0};
             err = callback(address, quantity, regs, nmbs->msg.unit_id, nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1038,6 +1400,9 @@ static nmbs_error handle_read_registers(nmbs_t* nmbs,
 
 
 #ifndef NMBS_SERVER_READ_COILS_DISABLED
+/**
+ * @brief Server FC01 Read Coils 入口，复用 handle_read_discrete()。
+ */
 static nmbs_error handle_read_coils(nmbs_t* nmbs) {
     return handle_read_discrete(nmbs, nmbs->callbacks.read_coils);
 }
@@ -1045,6 +1410,9 @@ static nmbs_error handle_read_coils(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_READ_DISCRETE_INPUTS_DISABLED
+/**
+ * @brief Server FC02 Read Discrete Inputs 入口。
+ */
 static nmbs_error handle_read_discrete_inputs(nmbs_t* nmbs) {
     return handle_read_discrete(nmbs, nmbs->callbacks.read_discrete_inputs);
 }
@@ -1052,6 +1420,9 @@ static nmbs_error handle_read_discrete_inputs(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_READ_HOLDING_REGISTERS_DISABLED
+/**
+ * @brief Server FC03 Read Holding Registers 入口。
+ */
 static nmbs_error handle_read_holding_registers(nmbs_t* nmbs) {
     return handle_read_registers(nmbs, nmbs->callbacks.read_holding_registers);
 }
@@ -1059,6 +1430,9 @@ static nmbs_error handle_read_holding_registers(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_READ_INPUT_REGISTERS_DISABLED
+/**
+ * @brief Server FC04 Read Input Registers 入口。
+ */
 static nmbs_error handle_read_input_registers(nmbs_t* nmbs) {
     return handle_read_registers(nmbs, nmbs->callbacks.read_input_registers);
 }
@@ -1066,6 +1440,12 @@ static nmbs_error handle_read_input_registers(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_WRITE_SINGLE_COIL_DISABLED
+/**
+ * @brief Server FC05 Write Single Coil 处理器。
+ *
+ * Coil 值只接受 0x0000 或 0xFF00；调用业务 callback 后，
+ * 非广播请求按规范回显地址和值。
+ */
 static nmbs_error handle_write_single_coil(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 4);
     if (err != NMBS_ERROR_NONE)
@@ -1088,7 +1468,8 @@ static nmbs_error handle_write_single_coil(nmbs_t* nmbs) {
             err = nmbs->callbacks.write_single_coil(address, value == 0 ? false : true, nmbs->msg.unit_id,
                                                     nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1120,6 +1501,11 @@ static nmbs_error handle_write_single_coil(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_WRITE_SINGLE_REGISTER_DISABLED
+/**
+ * @brief Server FC06 Write Single Register 处理器。
+ *
+ * 调用业务 callback 写入寄存器，非广播时回显地址和值。
+ */
 static nmbs_error handle_write_single_register(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 4);
     if (err != NMBS_ERROR_NONE)
@@ -1138,7 +1524,8 @@ static nmbs_error handle_write_single_register(nmbs_t* nmbs) {
         if (nmbs->callbacks.write_single_register) {
             err = nmbs->callbacks.write_single_register(address, value, nmbs->msg.unit_id, nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1170,6 +1557,12 @@ static nmbs_error handle_write_single_register(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_WRITE_MULTIPLE_COILS_DISABLED
+/**
+ * @brief Server FC15 Write Multiple Coils 处理器。
+ *
+ * 校验 quantity、Byte Count 和地址范围，将位数据交给业务 callback，
+ * 非广播时返回起始地址与写入数量。
+ */
 static nmbs_error handle_write_multiple_coils(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 5);
     if (err != NMBS_ERROR_NONE)
@@ -1215,7 +1608,8 @@ static nmbs_error handle_write_multiple_coils(nmbs_t* nmbs) {
             err = nmbs->callbacks.write_multiple_coils(address, quantity, coils, nmbs->msg.unit_id,
                                                        nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1247,6 +1641,12 @@ static nmbs_error handle_write_multiple_coils(nmbs_t* nmbs) {
 
 
 #ifndef NMBS_SERVER_WRITE_MULTIPLE_REGISTERS_DISABLED
+/**
+ * @brief Server FC16 Write Multiple Registers 处理器。
+ *
+ * 解析并校验寄存器数据，调用业务 callback；
+ * 非广播时回显起始地址与写入数量。
+ */
 static nmbs_error handle_write_multiple_registers(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 5);
     if (err != NMBS_ERROR_NONE)
@@ -1292,7 +1692,8 @@ static nmbs_error handle_write_multiple_registers(nmbs_t* nmbs) {
             err = nmbs->callbacks.write_multiple_registers(address, quantity, registers, nmbs->msg.unit_id,
                                                            nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1323,6 +1724,12 @@ static nmbs_error handle_write_multiple_registers(nmbs_t* nmbs) {
 #endif
 
 #ifndef NMBS_SERVER_READ_FILE_RECORD_DISABLED
+/**
+ * @brief Server FC20 Read File Record 处理器。
+ *
+ * 支持一个请求中的多个子请求，逐个校验文件/记录参数，
+ * 调用 read_file_record callback，并组装文件记录响应。
+ */
 static nmbs_error handle_read_file_record(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 1);
     if (err != NMBS_ERROR_NONE)
@@ -1408,7 +1815,8 @@ static nmbs_error handle_read_file_record(nmbs_t* nmbs) {
                 err = nmbs->callbacks.read_file_record(subreq[i].file_number, subreq[i].record_number, subreq_data,
                                                        subreq[i].record_length, nmbs->msg.unit_id, nmbs->callbacks.arg);
                 if (err != NMBS_ERROR_NONE) {
-                    if (nmbs_error_is_exception(err))
+                    // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                         return send_exception_msg(nmbs, err);
 
                     return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1436,6 +1844,12 @@ static nmbs_error handle_read_file_record(nmbs_t* nmbs) {
 #endif
 
 #ifndef NMBS_SERVER_WRITE_FILE_RECORD_DISABLED
+/**
+ * @brief Server FC21 Write File Record 处理器。
+ *
+ * 先完整校验各子请求，再调用 write_file_record callback。
+ * 正常响应要求回显原请求，因此代码会保存/恢复 buf_idx。
+ */
 static nmbs_error handle_write_file_record(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 1);
     if (err != NMBS_ERROR_NONE)
@@ -1509,7 +1923,8 @@ static nmbs_error handle_write_file_record(nmbs_t* nmbs) {
                 err = nmbs->callbacks.write_file_record(subreq_file_number, subreq_record_number, subreq_data,
                                                         subreq_record_length, nmbs->msg.unit_id, nmbs->callbacks.arg);
                 if (err != NMBS_ERROR_NONE) {
-                    if (nmbs_error_is_exception(err))
+                    // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                         return send_exception_msg(nmbs, err);
 
                     return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1544,6 +1959,11 @@ static nmbs_error handle_write_file_record(nmbs_t* nmbs) {
 #endif
 
 #ifndef NMBS_SERVER_READ_WRITE_REGISTERS_DISABLED
+/**
+ * @brief Server FC23 Read/Write Multiple Registers 处理器。
+ *
+ * 先处理写寄存器，再读取 holding registers 并返回读取结果。
+ */
 static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 9);
     if (err != NMBS_ERROR_NONE)
@@ -1602,7 +2022,8 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
         err = nmbs->callbacks.write_multiple_registers(write_address, write_quantity, registers, nmbs->msg.unit_id,
                                                        nmbs->callbacks.arg);
         if (err != NMBS_ERROR_NONE) {
-            if (nmbs_error_is_exception(err))
+            // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                 return send_exception_msg(nmbs, err);
 
             return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1617,7 +2038,8 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
             err = nmbs->callbacks.read_holding_registers(read_address, read_quantity, regs, nmbs->msg.unit_id,
                                                          nmbs->callbacks.arg);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1650,6 +2072,12 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
 #endif
 
 #ifndef NMBS_SERVER_READ_DEVICE_IDENTIFICATION_DISABLED
+/**
+ * @brief Server FC43 / MEI 0x0E 设备标识处理器。
+ *
+ * 根据 Read Device ID Code 和对象映射返回 Basic/Regular/Extended/Specific 数据。
+ * 因响应长度和对象数量需要最终才能确定，过程中会使用 set_1/set_2 回填字段。
+ */
 static nmbs_error handle_read_device_identification(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 3);
     if (err != NMBS_ERROR_NONE)
@@ -1686,7 +2114,8 @@ static nmbs_error handle_read_device_identification(nmbs_t* nmbs) {
 
             err = nmbs->callbacks.read_device_identification_map(map);
             if (err != NMBS_ERROR_NONE) {
-                if (nmbs_error_is_exception(err))
+                // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                     return send_exception_msg(nmbs, err);
 
                 return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1708,7 +2137,8 @@ static nmbs_error handle_read_device_identification(nmbs_t* nmbs) {
                 str[0] = 0;
                 err = nmbs->callbacks.read_device_identification(object_id, str);
                 if (err != NMBS_ERROR_NONE) {
-                    if (nmbs_error_is_exception(err))
+                    // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                         return send_exception_msg(nmbs, err);
 
                     return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1771,7 +2201,8 @@ static nmbs_error handle_read_device_identification(nmbs_t* nmbs) {
                 str[0] = 0;
                 err = nmbs->callbacks.read_device_identification((uint8_t) id, str);
                 if (err != NMBS_ERROR_NONE) {
-                    if (nmbs_error_is_exception(err))
+                    // callback 可以直接返回 Modbus Exception；其它内部错误统一映射为设备故障。
+        if (nmbs_error_is_exception(err))
                         return send_exception_msg(nmbs, err);
 
                     return send_exception_msg(nmbs, NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
@@ -1813,6 +2244,17 @@ static nmbs_error handle_read_device_identification(nmbs_t* nmbs) {
 #endif
 
 
+
+/* ========================================================================== */
+/* Server 分发与轮询 */
+/* ========================================================================== */
+
+/**
+ * @brief Server 功能码分发器。
+ *
+ * 根据当前 msg.fc 调用对应的 handle_xxx()；
+ * 未实现/未启用的功能码返回 Illegal Function 异常。
+ */
 static nmbs_error handle_req_fc(nmbs_t* nmbs) {
     NMBS_DEBUG_PRINT("fc %d\t", nmbs->msg.fc);
 
@@ -1890,7 +2332,8 @@ static nmbs_error handle_req_fc(nmbs_t* nmbs) {
             break;
 #endif
         default:
-            nmbs->platform.flush(nmbs, nmbs->platform.arg);
+            // 新请求开始前清理旧数据，避免上一帧残留污染本次响应。
+    nmbs->platform.flush(nmbs, nmbs->platform.arg);
             if (!nmbs->msg.ignored)
                 err = send_exception_msg(nmbs, NMBS_EXCEPTION_ILLEGAL_FUNCTION);
     }
@@ -1899,12 +2342,22 @@ static nmbs_error handle_req_fc(nmbs_t* nmbs) {
 }
 
 
+/**
+ * @brief 初始化 Server 数据模型回调表。
+ *
+ * 先清零，再写 initialized 魔数。具体 read/write callback 由应用层填写。
+ */
 void nmbs_callbacks_create(nmbs_callbacks* callbacks) {
     memset(callbacks, 0, sizeof(nmbs_callbacks));
     callbacks->initialized = 0xFFFFDEBE;
 }
 
 
+/**
+ * @brief 创建 Server 实例。
+ *
+ * 在基础 nmbs_create() 之上保存 RTU 本机地址和 Server callbacks。
+ */
 nmbs_error nmbs_server_create(nmbs_t* nmbs, uint8_t address_rtu, const nmbs_platform_conf* platform_conf,
                               const nmbs_callbacks* callbacks) {
     if (platform_conf->transport == NMBS_TRANSPORT_RTU && address_rtu == 0)
@@ -1924,6 +2377,13 @@ nmbs_error nmbs_server_create(nmbs_t* nmbs, uint8_t address_rtu, const nmbs_plat
 }
 
 
+/**
+ * @brief Server 主轮询入口：接收并处理一笔 Modbus 请求。
+ *
+ * 典型调用链：
+ *   recv_req_header() -> handle_req_fc() -> callback -> send_msg()
+ * 如果只收到首字节后出错，会尝试继续消费/清理相应报文状态。
+ */
 nmbs_error nmbs_server_poll(nmbs_t* nmbs) {
     msg_state_reset(nmbs);
 
@@ -1950,7 +2410,8 @@ nmbs_error nmbs_server_poll(nmbs_t* nmbs) {
     err = handle_req_fc(nmbs);
     if (err != NMBS_ERROR_NONE) {
         if (err != NMBS_ERROR_TIMEOUT)
-            nmbs->platform.flush(nmbs, nmbs->platform.arg);
+            // 新请求开始前清理旧数据，避免上一帧残留污染本次响应。
+    nmbs->platform.flush(nmbs, nmbs->platform.arg);
 
         return err;
     }
@@ -1958,6 +2419,9 @@ nmbs_error nmbs_server_poll(nmbs_t* nmbs) {
     return NMBS_ERROR_NONE;
 }
 
+/**
+ * @brief 修改 Server 数据模型 callback 的用户上下文指针。
+ */
 void nmbs_set_callbacks_arg(nmbs_t* nmbs, void* arg) {
     nmbs->callbacks.arg = arg;
 }
@@ -1965,11 +2429,27 @@ void nmbs_set_callbacks_arg(nmbs_t* nmbs, void* arg) {
 
 
 #ifndef NMBS_CLIENT_DISABLED
+
+/* ========================================================================== */
+/* Client 公共 API */
+/* ========================================================================== */
+
+/**
+ * @brief 创建 Client 实例。
+ *
+ * Client 本身没有额外动态资源，主要复用 nmbs_create() 初始化协议实例。
+ */
 nmbs_error nmbs_client_create(nmbs_t* nmbs, const nmbs_platform_conf* platform_conf) {
     return nmbs_create(nmbs, platform_conf);
 }
 
 
+/**
+ * @brief Client FC01/FC02 共享实现。
+ *
+ * 校验 quantity/address -> 开始请求状态 -> 组包 -> 发送 ->
+ * 非广播情况下接收并解析离散量响应。
+ */
 static nmbs_error read_discrete(nmbs_t* nmbs, uint8_t fc, uint16_t address, uint16_t quantity, nmbs_bitfield values) {
     if (quantity < 1 || quantity > NMBS_BITFIELD_MAX)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -1993,15 +2473,26 @@ static nmbs_error read_discrete(nmbs_t* nmbs, uint8_t fc, uint16_t address, uint
 }
 
 
+/**
+ * @brief Client FC01 Read Coils 公共 API。
+ */
 nmbs_error nmbs_read_coils(nmbs_t* nmbs, uint16_t address, uint16_t quantity, nmbs_bitfield coils_out) {
     return read_discrete(nmbs, 1, address, quantity, coils_out);
 }
 
 
+/**
+ * @brief Client FC02 Read Discrete Inputs 公共 API。
+ */
 nmbs_error nmbs_read_discrete_inputs(nmbs_t* nmbs, uint16_t address, uint16_t quantity, nmbs_bitfield inputs_out) {
     return read_discrete(nmbs, 2, address, quantity, inputs_out);
 }
 
+/**
+ * @brief Client FC03/FC04 共享实现。
+ *
+ * 请求体为 Address + Quantity；响应由 recv_read_registers_res() 解析。
+ */
 static nmbs_error read_registers(nmbs_t* nmbs, uint8_t fc, uint16_t address, uint16_t quantity, uint16_t* registers) {
     if (quantity < 1 || quantity > 125)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -2025,16 +2516,28 @@ static nmbs_error read_registers(nmbs_t* nmbs, uint8_t fc, uint16_t address, uin
 }
 
 
+/**
+ * @brief Client FC03 Read Holding Registers 公共 API。
+ */
 nmbs_error nmbs_read_holding_registers(nmbs_t* nmbs, uint16_t address, uint16_t quantity, uint16_t* registers_out) {
     return read_registers(nmbs, 3, address, quantity, registers_out);
 }
 
 
+/**
+ * @brief Client FC04 Read Input Registers 公共 API。
+ */
 nmbs_error nmbs_read_input_registers(nmbs_t* nmbs, uint16_t address, uint16_t quantity, uint16_t* registers_out) {
     return read_registers(nmbs, 4, address, quantity, registers_out);
 }
 
 
+/**
+ * @brief Client FC05 Write Single Coil。
+ *
+ * true 编码为 0xFF00，false 编码为 0x0000；
+ * RTU 广播发送后不等待响应。
+ */
 nmbs_error nmbs_write_single_coil(nmbs_t* nmbs, uint16_t address, bool value) {
     msg_state_req(nmbs, 5);
     put_req_header(nmbs, 4);
@@ -2057,6 +2560,11 @@ nmbs_error nmbs_write_single_coil(nmbs_t* nmbs, uint16_t address, bool value) {
 }
 
 
+/**
+ * @brief Client FC06 Write Single Register。
+ *
+ * RTU 广播请求发送完成后不等待响应。
+ */
 nmbs_error nmbs_write_single_register(nmbs_t* nmbs, uint16_t address, uint16_t value) {
     msg_state_req(nmbs, 6);
     put_req_header(nmbs, 4);
@@ -2070,6 +2578,7 @@ nmbs_error nmbs_write_single_register(nmbs_t* nmbs, uint16_t address, uint16_t v
     if (err != NMBS_ERROR_NONE)
         return err;
 
+    // RTU 广播地址 0 不会有从站响应，因此广播写请求发送后立即成功返回。
     if (!nmbs->msg.broadcast)
         return recv_write_single_register_res(nmbs, address, value);
 
@@ -2077,6 +2586,11 @@ nmbs_error nmbs_write_single_register(nmbs_t* nmbs, uint16_t address, uint16_t v
 }
 
 
+/**
+ * @brief Client FC15 Write Multiple Coils。
+ *
+ * quantity 最大 1968；请求中的线圈按位打包，Byte Count=(quantity+7)/8。
+ */
 nmbs_error nmbs_write_multiple_coils(nmbs_t* nmbs, uint16_t address, uint16_t quantity, const nmbs_bitfield coils) {
     if (quantity < 1 || quantity > 0x07B0)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -2111,6 +2625,11 @@ nmbs_error nmbs_write_multiple_coils(nmbs_t* nmbs, uint16_t address, uint16_t qu
 }
 
 
+/**
+ * @brief Client FC16 Write Multiple Registers。
+ *
+ * 每个寄存器按高字节在前写入，请求包含 Byte Count=quantity*2。
+ */
 nmbs_error nmbs_write_multiple_registers(nmbs_t* nmbs, uint16_t address, uint16_t quantity, const uint16_t* registers) {
     if (quantity < 1 || quantity > 0x007B)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -2145,6 +2664,11 @@ nmbs_error nmbs_write_multiple_registers(nmbs_t* nmbs, uint16_t address, uint16_
 }
 
 
+/**
+ * @brief Client FC20 Read File Record。
+ *
+ * 当前 API 构造单个文件记录子请求，Reference Type 固定为 0x06。
+ */
 nmbs_error nmbs_read_file_record(nmbs_t* nmbs, uint16_t file_number, uint16_t record_number, uint16_t* registers,
                                  uint16_t count) {
     if (file_number == 0x0000)
@@ -2175,6 +2699,11 @@ nmbs_error nmbs_read_file_record(nmbs_t* nmbs, uint16_t file_number, uint16_t re
 }
 
 
+/**
+ * @brief Client FC21 Write File Record。
+ *
+ * 使用 put_regs() 批量编码寄存器数据；正常响应会回显请求。
+ */
 nmbs_error nmbs_write_file_record(nmbs_t* nmbs, uint16_t file_number, uint16_t record_number, const uint16_t* registers,
                                   uint16_t count) {
     if (file_number == 0x0000)
@@ -2210,6 +2739,12 @@ nmbs_error nmbs_write_file_record(nmbs_t* nmbs, uint16_t file_number, uint16_t r
 }
 
 
+/**
+ * @brief Client FC23 Read/Write Multiple Registers。
+ *
+ * 一帧中同时携带读地址/数量与写地址/数量、写数据，
+ * 响应只返回读取到的寄存器。
+ */
 nmbs_error nmbs_read_write_registers(nmbs_t* nmbs, uint16_t read_address, uint16_t read_quantity,
                                      uint16_t* registers_out, uint16_t write_address, uint16_t write_quantity,
                                      const uint16_t* registers) {
@@ -2253,6 +2788,11 @@ nmbs_error nmbs_read_write_registers(nmbs_t* nmbs, uint16_t read_address, uint16
 }
 
 
+/**
+ * @brief Client 读取 Basic Device Identification（对象 0x00~0x02）。
+ *
+ * 根据 More Follows / Next Object ID 自动发送后续请求，直到完整接收。
+ */
 nmbs_error nmbs_read_device_identification_basic(nmbs_t* nmbs, char* vendor_name, char* product_code,
                                                  char* major_minor_revision, uint8_t buffers_length) {
     const uint8_t order[3] = {0, 1, 2};
@@ -2289,6 +2829,9 @@ nmbs_error nmbs_read_device_identification_basic(nmbs_t* nmbs, char* vendor_name
 }
 
 
+/**
+ * @brief Client 读取 Regular Device Identification（对象 0x03~0x06）。
+ */
 nmbs_error nmbs_read_device_identification_regular(nmbs_t* nmbs, char* vendor_url, char* product_name, char* model_name,
                                                    char* user_application_name, uint8_t buffers_length) {
     const uint8_t order[7] = {0, 0, 0, 0, 1, 2, 3};
@@ -2325,6 +2868,11 @@ nmbs_error nmbs_read_device_identification_regular(nmbs_t* nmbs, char* vendor_ur
 }
 
 
+/**
+ * @brief Client 读取 Extended Device Identification（对象 ID >= 0x80）。
+ *
+ * 支持设备返回多段响应，并持续从 Next Object ID 继续读取。
+ */
 nmbs_error nmbs_read_device_identification_extended(nmbs_t* nmbs, uint8_t object_id_start, uint8_t* ids, char** buffers,
                                                     uint8_t ids_length, uint8_t buffer_length,
                                                     uint8_t* objects_count_out) {
@@ -2361,6 +2909,9 @@ nmbs_error nmbs_read_device_identification_extended(nmbs_t* nmbs, uint8_t object
 }
 
 
+/**
+ * @brief Client 按指定 Object ID 读取单个设备标识对象（Specific Access）。
+ */
 nmbs_error nmbs_read_device_identification(nmbs_t* nmbs, uint8_t object_id, char* buffer, uint8_t buffer_length) {
     if (object_id > 0x06 && object_id < 0x80)
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -2380,6 +2931,12 @@ nmbs_error nmbs_read_device_identification(nmbs_t* nmbs, uint8_t object_id, char
 }
 
 
+/**
+ * @brief 发送自定义/原始 Modbus PDU。
+ *
+ * 调用者提供 Function Code 和 PDU Data；nanoMODBUS 仍负责 RTU/TCP 头、
+ * RTU CRC 和底层发送。PDU Data 的字段字节序由调用者自行保证。
+ */
 nmbs_error nmbs_send_raw_pdu(nmbs_t* nmbs, uint8_t fc, const uint8_t* data, uint16_t data_len) {
     if (data_len > 252 || (data_len > 0 && !data))
         return NMBS_ERROR_INVALID_ARGUMENT;
@@ -2397,6 +2954,12 @@ nmbs_error nmbs_send_raw_pdu(nmbs_t* nmbs, uint8_t fc, const uint8_t* data, uint
 }
 
 
+/**
+ * @brief 接收原始 PDU 请求对应的响应数据。
+ *
+ * nanoMODBUS 仍负责响应头、异常和 RTU CRC 校验；
+ * 调用者负责解释 data_out 中的功能码私有数据。
+ */
 nmbs_error nmbs_receive_raw_pdu_response(nmbs_t* nmbs, uint8_t* data_out, uint8_t data_out_len) {
     nmbs_error err = recv_res_header(nmbs);
     if (err != NMBS_ERROR_NONE)
@@ -2425,6 +2988,14 @@ nmbs_error nmbs_receive_raw_pdu_response(nmbs_t* nmbs, uint8_t* data_out, uint8_
 
 
 #ifndef NMBS_STRERROR_DISABLED
+
+/* ========================================================================== */
+/* 错误字符串 */
+/* ========================================================================== */
+
+/**
+ * @brief 将 nmbs_error 转换为便于日志打印的英文字符串。
+ */
 const char* nmbs_strerror(nmbs_error error) {
     switch (error) {
         case NMBS_ERROR_INVALID_REQUEST:
@@ -2471,3 +3042,4 @@ const char* nmbs_strerror(nmbs_error error) {
     }
 }
 #endif
+

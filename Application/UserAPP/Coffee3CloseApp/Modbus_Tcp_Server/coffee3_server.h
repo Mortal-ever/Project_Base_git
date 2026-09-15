@@ -18,7 +18,7 @@ extern "C" {
 #include "coffee3_app_config.h"
 #include "coffee3_workflow.h"
 
-/** @brief Host writable protocol block 0x0000 through 0x00AF. */
+/** @brief Command mirror; writes require explicit product support. */
 #define COFFEE3_SERVER_COMMAND_COUNT          0x00B0U
 /** @brief Host readable protocol block 0x1000 through 0x10FF. */
 #define COFFEE3_SERVER_STATUS_COUNT           0x0100U
@@ -98,6 +98,8 @@ extern "C" {
 void vCoffee3ServerPublishOrder(const Coffee3Order_t *pxOrder);
 /** @brief Publish the storage selector polled by the robot at 0x0032. */
 void vCoffee3ServerSelectStorage(uint16_t usStorage);
+/** @brief Publish outlet one at 0x000A and 0x0033 before robot motion. */
+void vCoffee3ServerSelectOutlet(void);
 /** @brief Clear completed request triggers without clearing status results. */
 void vCoffee3ServerFinishRequest(uint8_t ucStoragePickup);
 

@@ -6,6 +6,7 @@
   */
 
 #include "coffee3_device.h"
+#include "coffee3_robot_tcp.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -261,6 +262,16 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 		}
 		pxCommand->ulCommandId = s_ulNextCommandId;
 		taskEXIT_CRITICAL();
+	}
+	/* Robot motion debug uses the Robot owner's single deferred slot. Body
+	 * controls stay on the normal route because they only require TCP. */
+	if ((pxCommand->ucDeviceId == (uint8_t)COFFEE3_DEVICE_ROBOT) &&
+		(pxCommand->ucSource == (uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) &&
+		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) != 0U) &&
+		((pxCommand->usAction < COFFEE3_ACTION_ROBOT_START) ||
+		 (pxCommand->usAction > COFFEE3_ACTION_ROBOT_MANUAL_MODE)) &&
+		(pxCommand->usAction != COFFEE3_ACTION_REFRESH)) {
+		return xCoffee3RobotTcpSubmitManualMotion(pxCommand);
 	}
 	if ((pxCommand->ucSource == COFFEE3_COMMAND_SOURCE_SERVER) &&
 		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) == 0U)) {

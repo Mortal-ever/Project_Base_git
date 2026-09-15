@@ -16,6 +16,7 @@ extern "C" {
 
 #include "FreeRTOS.h"
 #include "coffee3_app_config.h"
+#include "coffee3_device.h"
 
 #if (COFFEE3_ROBOT_PROTOCOL_VARIANT == \
 	COFFEE3_ROBOT_PROTOCOL_2) || \
@@ -54,6 +55,9 @@ extern Coffee3RobotData_t g_xCoffee3RobotData;
   * @retval pdFAIL Queue creation failed.
   */
 BaseType_t xCoffee3RobotTcpInitialize(void);
+
+/** @brief Atomically reserve the single deferred manual Robot motion slot. */
+BaseType_t xCoffee3RobotTcpSubmitManualMotion(Coffee3Command_t *pxCommand);
 
 /**
   * @brief Maintain Robot connection, execute commands, and reconnect.

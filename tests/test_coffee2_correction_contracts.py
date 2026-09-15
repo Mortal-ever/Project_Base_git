@@ -8,7 +8,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "Application/UserAPP/Coffee2App"
+APP = ROOT / "Application/UserAPP/Coffee2OpenApp"
 
 
 def read(path):

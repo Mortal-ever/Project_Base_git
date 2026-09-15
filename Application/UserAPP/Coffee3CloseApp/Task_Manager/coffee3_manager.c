@@ -12,6 +12,7 @@
 
 #include "FreeRTOS.h"
 #include "coffee3_app_config.h"
+#include "coffee3_config.h"
 #include "coffee3_device.h"
 #include "coffee3_io.h"
 #include "coffee3_log.h"
@@ -217,6 +218,13 @@ AppTaskManagerResult_e xAppTaskManagerCreateTasks(void)
 	}
 	(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
 		COFFEE3_LOG_SOURCE_SYSTEM, "MODULE_INIT:ReadyEvents", 0);
+	if (xCoffee3ConfigInitialize() != CONFIG_STORE_OK) {
+		static const uint8_t aucConfigFail[] = "Coffee3 configuration initialization failed; startup blocked\r\n";
+		(void)lCoffee3LogEarlyWrite(aucConfigFail,
+			(uint16_t)(sizeof(aucConfigFail) - 1U));
+		s_xStatus.xStartResult = APP_TASK_MANAGER_RESULT_MODULE_INIT;
+		return s_xStatus.xStartResult;
+	}
 	if (xCoffee3DeviceInitialize() != pdPASS) {
 		(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_ERROR,
 			COFFEE3_LOG_SOURCE_SYSTEM, "MODULE_INIT:Devices",
