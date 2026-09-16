@@ -284,7 +284,8 @@ static nmbs_error recv(nmbs_t* nmbs, uint16_t count) {
     if (nmbs->msg.buf_idx > sizeof(nmbs->msg.buf) ||
         count > sizeof(nmbs->msg.buf) - nmbs->msg.buf_idx)
         return NMBS_ERROR_INVALID_RESPONSE;
-
+        
+    // 读取 count 个字节到 buf[buf_idx]，并推进 buf_idx。
     const int32_t ret =
             nmbs->platform.read(nmbs->msg.buf + nmbs->msg.buf_idx, count, nmbs->byte_timeout_ms, nmbs->platform.arg);
 
