@@ -766,19 +766,25 @@ static nmbs_error send_exception_msg(nmbs_t* nmbs, uint8_t exception) {
  *   - FC+0x80 时解析 Modbus Exception。
  */
 static nmbs_error recv_res_header(nmbs_t* nmbs) {
+    // 保存请求的 Transaction ID / Unit ID / Function Code，用于后续验证响应
     const uint16_t req_transaction_id = nmbs->msg.transaction_id;
     const uint8_t req_unit_id = nmbs->msg.unit_id;
     const uint8_t req_fc = nmbs->msg.fc;
 
     bool first_byte_received = false;
-    nmbs_error err = recv_msg_header(nmbs, &first_byte_received);
-    if (err != NMBS_ERROR_NONE)
-        return err;
+    nmbs_error err;
 
-    if (nmbs->platform.transport == NMBS_TRANSPORT_TCP) {
-        if (nmbs->msg.transaction_id != req_transaction_id)
-            return NMBS_ERROR_INVALID_TCP_MBAP;
-    }
+    /* A delayed response from an earlier TCP transaction is a complete but
+     * stale ADU, not evidence that the socket is disconnected. The TCP header
+     * reader has already consumed the complete ADU when its MBAP length is
+     * valid, so discard it and keep waiting for this request's transaction ID.
+     * The platform callback still enforces the transaction's total deadline. */
+    do {
+        err = recv_msg_header(nmbs, &first_byte_received);
+        if (err != NMBS_ERROR_NONE)
+            return err;
+    } while ((nmbs->platform.transport == NMBS_TRANSPORT_TCP) &&
+             (nmbs->msg.transaction_id != req_transaction_id));
 
     if (nmbs->platform.transport == NMBS_TRANSPORT_RTU && nmbs->msg.unit_id != req_unit_id)
         return NMBS_ERROR_INVALID_UNIT_ID;
@@ -802,8 +808,9 @@ static nmbs_error recv_res_header(nmbs_t* nmbs) {
             // 正数 1~4 直接作为 nmbs_error 返回，调用者可区分协议异常与通信错误。
             return (nmbs_error) exception;
         }
-
+        
         return NMBS_ERROR_INVALID_RESPONSE;
+        // 收到的功能码既不是请求的原功能码，也不是异常响应的功能码，视为无效响应。
     }
 
     NMBS_DEBUG_PRINT("%d NMBS res <- address_rtu %d\tfc %d\t", nmbs->address_rtu, nmbs->msg.unit_id, nmbs->msg.fc);
@@ -1335,7 +1342,7 @@ static nmbs_error handle_read_discrete(nmbs_t* nmbs,
  */
 static nmbs_error handle_read_registers(nmbs_t* nmbs,
                                         nmbs_error (*callback)(uint16_t, uint16_t, uint16_t*, uint8_t, void*)) {
-    nmbs_error err = recv(nmbs, 4);
+    nmbs_error err = recv(nmbs, 4); // 回收4个字节数据
     if (err != NMBS_ERROR_NONE)
         return err;
 
@@ -1968,7 +1975,7 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
     nmbs_error err = recv(nmbs, 9);
     if (err != NMBS_ERROR_NONE)
         return err;
-
+    // 解析请求参数
     const uint16_t read_address = get_2(nmbs);
     const uint16_t read_quantity = get_2(nmbs);
     const uint16_t write_address = get_2(nmbs);
@@ -1999,7 +2006,7 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
     err = recv_msg_footer(nmbs);
     if (err != NMBS_ERROR_NONE)
         return err;
-
+    // 确认这帧是发给本设备的
     if (!nmbs->msg.ignored) {
         if (read_quantity < 1 || read_quantity > 0x007D)
             return send_exception_msg(nmbs, NMBS_EXCEPTION_ILLEGAL_DATA_VALUE);
@@ -2058,7 +2065,7 @@ static nmbs_error handle_read_write_registers(nmbs_t* nmbs) {
                 NMBS_DEBUG_PRINT("%d ", regs[i]);
             }
 
-            err = send_msg(nmbs);
+            err = send_msg(nmbs); // 发送响应
             if (err != NMBS_ERROR_NONE)
                 return err;
         }
@@ -2385,10 +2392,10 @@ nmbs_error nmbs_server_create(nmbs_t* nmbs, uint8_t address_rtu, const nmbs_plat
  * 如果只收到首字节后出错，会尝试继续消费/清理相应报文状态。
  */
 nmbs_error nmbs_server_poll(nmbs_t* nmbs) {
-    msg_state_reset(nmbs);
+    msg_state_reset(nmbs);// 清理上一笔消息状态
 
     bool first_byte_received = false;
-    nmbs_error err = recv_req_header(nmbs, &first_byte_received);
+    nmbs_error err = recv_req_header(nmbs, &first_byte_received); // 等待新请求
     if (err != NMBS_ERROR_NONE) {
         if (!first_byte_received && err == NMBS_ERROR_TIMEOUT)
             return NMBS_ERROR_NONE;
@@ -2411,7 +2418,7 @@ nmbs_error nmbs_server_poll(nmbs_t* nmbs) {
     if (err != NMBS_ERROR_NONE) {
         if (err != NMBS_ERROR_TIMEOUT)
             // 新请求开始前清理旧数据，避免上一帧残留污染本次响应。
-    nmbs->platform.flush(nmbs, nmbs->platform.arg);
+            nmbs->platform.flush(nmbs, nmbs->platform.arg);
 
         return err;
     }
@@ -2500,11 +2507,11 @@ static nmbs_error read_registers(nmbs_t* nmbs, uint8_t fc, uint16_t address, uin
     if ((uint32_t) address + (uint32_t) quantity > ((uint32_t) 0xFFFF) + 1)
         return NMBS_ERROR_INVALID_ARGUMENT;
 
-    msg_state_req(nmbs, fc);
-    put_req_header(nmbs, 4);
+    msg_state_req(nmbs, fc); // 构造事物上下文
+    put_req_header(nmbs, 4); // 将请求头写入缓冲区，长度为 4 字节
 
-    put_2(nmbs, address);
-    put_2(nmbs, quantity);
+    put_2(nmbs, address);   // 将寄存器地址写入缓冲区
+    put_2(nmbs, quantity);  // 将寄存器数量写入缓冲区
 
     NMBS_DEBUG_PRINT("a %d\tq %d ", address, quantity);
 

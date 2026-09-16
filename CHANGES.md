@@ -923,3 +923,6 @@
 - 新增 `Coffee3Close上位机写入拒绝地址清单二次审查版.md`，吸收首轮审批意见。
 - 重新核对 Coffee1 对 `0x0041`、`0x0043`、`0x00AA~0x00AF` 的真实实现，区分实际执行、配置保存、兼容接收和明确拒绝。
 - 本轮仅更新审查文档，未修改固件源码或工程配置。
+
+| 2026-09-15 | Application/New_Party/nanoMODBUS/Src/nanomodbus.c; Application/UserAPP/Coffee3CloseApp/Robot_Tcp/coffee3_robot_tcp.c; Application/UserAPP/Coffee3CloseApp/Modbus_Tcp_Server/coffee3_server.c | Fix | 丢弃并跳过 Modbus TCP 旧事务响应；Coffee3 Robot 将协议坏帧、连续无响应与确定的 TCP 断开分级恢复，保留有界会话重建；兼容配置日志仅在首次写入或值变化时输出。Coffee2Open/Coffee3Close GCC Debug 及 Coffee3Close Keil ARMCC V5 构建通过。 |
+| 2026-09-16 | Application/UserAPP/Coffee3CloseApp/WorkFlow/coffee3_workflow.c | Fix | Coffee3 残杯放杯动作完成后静置 800 ms；针对对应储位单个 IO 间隔 200 ms 独立刷新并比较两次读数，无论有杯或无杯均须一致才确认；不一致仅告警一次并继续成对核验。日志文案适配 72 字符上限；GCC Coffee3Close Debug、Keil ARMCC V5 构建通过，30 项现有测试通过。 |

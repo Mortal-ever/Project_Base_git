@@ -14,6 +14,7 @@
 #include "coffee3_device.h"
 #include "coffee3_device_image.h"
 #include "coffee3_io.h"
+#include "coffee3_io_names.h"
 #include "coffee3_log.h"
 #include "coffee3_server.h"
 #include "coffee3_robot_tcp.h"
@@ -34,6 +35,8 @@
 /** @brief Maximum time allowed for each safety-stop acknowledgement. */
 #define COFFEE3_WORKFLOW_SAFE_STOP_MS          5000U
 #define COFFEE3_WORKFLOW_ROBOT_MOTION_MS       60000U
+#define COFFEE3_RESIDUAL_SETTLE_MS              800U
+#define COFFEE3_RESIDUAL_SAMPLE_GAP_MS          200U
 #define COFFEE3_CONDITION_CUP_1                1U
 #define COFFEE3_CONDITION_CUP_2                2U
 #define COFFEE3_CONDITION_LID_1                3U
@@ -2164,6 +2167,10 @@ static int32_t prvProbeResidualCup(uint16_t usStepBase,
 	Coffee3IoState_t xIo;
 	int32_t lResult;
 	int32_t lStorage;
+	uint8_t ucFirstCup;
+	uint8_t ucCupPresent;
+	uint8_t ucMismatchLogged;
+	const char *pcIoName;
 
 	lStorage = prvSelectStorage();
 	if (lStorage < 1) {
@@ -2184,22 +2191,48 @@ static int32_t prvProbeResidualCup(uint16_t usStepBase,
 			COFFEE3_ACTION_ROBOT_PUT_STORAGE, (uint16_t)lStorage, 0U,
 			COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
 	}
-	if (lResult == 0) {
-		prvDelayWithServices(500U);
+	if (lResult != 0) {
+		return lResult;
+	}
+	prvDelayWithServices(COFFEE3_RESIDUAL_SETTLE_MS);
+	pcIoName = (lStorage == 1) ? COFFEE3_IO_NAME_MB1_DI_1 :
+		COFFEE3_IO_NAME_MB1_DI_2;
+	ucMismatchLogged = 0U;
+	for (;;) {
 		lResult = prvRefreshDeviceQuiet((uint16_t)(usStepBase + 2U),
 			COFFEE3_DEVICE_IO_INPUT);
-	}
-	vCoffee3IoGetSnapshot(&xIo);
-	if ((lResult != 0) || (prvIoValid(&xIo) == 0U)) {
-		return (lResult != 0) ? lResult : COFFEE3_WORKFLOW_ERROR_IO;
+		vCoffee3IoGetSnapshot(&xIo);
+		if ((lResult != 0) || (prvIoValid(&xIo) == 0U)) {
+			return (lResult != 0) ? lResult : COFFEE3_WORKFLOW_ERROR_IO;
+		}
+		ucFirstCup = xIo.xInput.aucMB1XPin[lStorage - 1];
+		prvDelayWithServices(COFFEE3_RESIDUAL_SAMPLE_GAP_MS);
+		lResult = prvRefreshDeviceQuiet((uint16_t)(usStepBase + 2U),
+			COFFEE3_DEVICE_IO_INPUT);
+		vCoffee3IoGetSnapshot(&xIo);
+		if ((lResult != 0) || (prvIoValid(&xIo) == 0U)) {
+			return (lResult != 0) ? lResult : COFFEE3_WORKFLOW_ERROR_IO;
+		}
+		ucCupPresent = xIo.xInput.aucMB1XPin[lStorage - 1];
+		if (ucFirstCup == ucCupPresent) {
+			break;
+		}
+		if (ucMismatchLogged == 0U) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+				"Residual %s unstable: %u/%u; retry",
+				pcIoName, (unsigned int)ucFirstCup,
+				(unsigned int)ucCupPresent);
+			ucMismatchLogged = 1U;
+		}
 	}
 	(void)xCoffee3LogPrintfOrder(
-		(xIo.xInput.aucMB1XPin[lStorage - 1] != 0U) ?
+		(ucCupPresent != 0U) ?
 			COFFEE3_LOG_LEVEL_WARNING : COFFEE3_LOG_LEVEL_INFO,
 		COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-		"Residual source=%u checked at storage=%ld; cup_present=%u",
+		"Residual source=%u storage=%ld io=%s cup=%u",
 		(unsigned int)ucOccupiedPoint, (long)lStorage,
-		(unsigned int)xIo.xInput.aucMB1XPin[lStorage - 1]);
+		pcIoName, (unsigned int)ucCupPresent);
 	return 0;
 }
 

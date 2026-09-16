@@ -44,6 +44,27 @@
 #define COFFEE3_SERVER_REMOVED_IO_DEBUG_FIRST  0x0084U
 #define COFFEE3_SERVER_REMOVED_IO_DEBUG_LAST   0x0086U
 
+static const uint16_t s_ausCompatibilityLogAddresses[] = {
+	0x001FU,
+	COFFEE3_REG_WATER_BUCKET_ENABLE,
+	COFFEE3_REG_WATER_VALVE_DEBUG,
+	COFFEE3_REG_UV_LAMP,
+	COFFEE3_REG_PRINTER_STATUS,
+	COFFEE3_REG_STORAGE_SELECTOR,
+	COFFEE3_REG_HOT_CUP_HEIGHT_OFFSET,
+	COFFEE3_REG_COLD_CUP_HEIGHT_OFFSET,
+	COFFEE3_REG_ROBOT_TYPE,
+	COFFEE3_REG_COFFEE_PICKUP_TIME,
+	COFFEE3_REG_AUXILIARY_TANK_PUMP,
+	COFFEE3_REG_COFFEE_MACHINE_TYPE,
+	COFFEE3_REG_ICE_COEFFICIENT,
+	COFFEE3_REG_ICE_MACHINE_TYPE,
+	0x00AAU, 0x00ABU, 0x00ACU, 0x00ADU, 0x00AEU, 0x00AFU
+};
+#define COFFEE3_COMPATIBILITY_LOG_COUNT \
+	(sizeof(s_ausCompatibilityLogAddresses) / \
+	 sizeof(s_ausCompatibilityLogAddresses[0]))
+
 /** @brief Reusable resources for one accepted socket slot. */
 typedef struct {
 	TransportChannel_t xChannel;
@@ -70,6 +91,10 @@ static uint8_t s_ucOrderLatched;
 static uint8_t s_ucOtaRejectLogged;
 /** @brief Defer the legacy 0x0201 reset to the Server owner loop. */
 static uint8_t s_ucOtaResetPending;
+static uint16_t s_ausCompatibilityLogValues[
+	COFFEE3_COMPATIBILITY_LOG_COUNT];
+static uint8_t s_aucCompatibilityLogValid[
+	COFFEE3_COMPATIBILITY_LOG_COUNT];
 
 /**
   * @brief  Log one accepted client with its actual peer IPv4 endpoint.
@@ -151,6 +176,8 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 	uint16_t usQuantity);
 static void prvLogCompatibilityWrites(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters);
+static uint8_t prvCompatibilityLogValueChanged(uint16_t usAddress,
+	uint16_t usValue);
 static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 	uint16_t usValue);
 static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
@@ -216,6 +243,10 @@ BaseType_t xCoffee3ServerInitialize(void)
 		sizeof(g_xCoffee3ServerStatus));
 	memset(s_ausCommandRegisters, 0,
 		sizeof(s_ausCommandRegisters));
+	memset(s_ausCompatibilityLogValues, 0,
+		sizeof(s_ausCompatibilityLogValues));
+	memset(s_aucCompatibilityLogValid, 0,
+		sizeof(s_aucCompatibilityLogValid));
 	s_ausCommandRegisters[COFFEE3_CONFIG_STORAGE_REGISTER] =
 		usCoffee3ConfigStorageMask();
 	for (ucIndex = 0U; ucIndex < COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT;
@@ -1528,6 +1559,28 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+static uint8_t prvCompatibilityLogValueChanged(uint16_t usAddress,
+	uint16_t usValue)
+{
+	uint16_t usIndex;
+
+	for (usIndex = 0U; usIndex < COFFEE3_COMPATIBILITY_LOG_COUNT;
+		usIndex++) {
+		if (s_ausCompatibilityLogAddresses[usIndex] != usAddress) {
+			continue;
+		}
+		if ((s_aucCompatibilityLogValid[usIndex] != 0U) &&
+			(s_ausCompatibilityLogValues[usIndex] == usValue)) {
+			return 0U;
+		}
+		s_ausCompatibilityLogValues[usIndex] = usValue;
+		s_aucCompatibilityLogValid[usIndex] = 1U;
+		return 1U;
+	}
+	return 1U;
+}
+
+/*-----------------------------------------------------------*/
 static void prvLogCompatibilityWrites(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
@@ -1586,7 +1639,9 @@ static void prvLogCompatibilityWrites(uint16_t usAddress,
 		default:
 			break;
 		}
-		if (pcReason != NULL) {
+		if ((pcReason != NULL) &&
+			(prvCompatibilityLogValueChanged(usCurrentAddress,
+				usValue) != 0U)) {
 			if ((usCurrentAddress == COFFEE3_REG_WATER_BUCKET_ENABLE) ||
 				(usCurrentAddress == COFFEE3_REG_STORAGE_SELECTOR)) {
 				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
@@ -1603,7 +1658,9 @@ static void prvLogCompatibilityWrites(uint16_t usAddress,
 			}
 		}
 		if ((usCurrentAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
-			(usCurrentAddress <= COFFEE3_REG_FRUIT_COEFFICIENT_LAST)) {
+			(usCurrentAddress <= COFFEE3_REG_FRUIT_COEFFICIENT_LAST) &&
+			(prvCompatibilityLogValueChanged(usCurrentAddress,
+				usValue) != 0U)) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
 				"Fruit coefficient saved: channel=%u requested=%u effective=%u installed=%u",

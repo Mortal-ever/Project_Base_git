@@ -34,6 +34,8 @@
 #define C3_PORT_MAGIC 0x43535054UL
 static uint8_t s_ucFreshReadyReset;
 static uint8_t s_ucConnectionStartupPending;
+static uint8_t s_ucRobotProtocolFailureCount;
+static uint8_t s_ucRobotNoResponseCount;
 
 static uint16_t prvReserveRobotPort(void)
 {
@@ -114,8 +116,8 @@ static uint16_t prvReserveRobotPort(void)
 #define COFFEE3_ROBOT_STARTUP_STEP_DELAY_MS  200U
 #define COFFEE3_ROBOT_STARTUP_FINAL_WAIT_MS  8000U
 #define COFFEE3_ROBOT_STARTUP_POLL_MS        100U
-#define COFFEE3_ROBOT_LINK_PROBE_COUNT       2U
-#define COFFEE3_ROBOT_LINK_PROBE_DELAY_MS    100U
+#define COFFEE3_ROBOT_PROTOCOL_FAILURE_LIMIT 3U
+#define COFFEE3_ROBOT_NO_RESPONSE_LIMIT      5U
 /** @brief Maximum connection event text kept on the Robot task stack. */
 #define COFFEE3_ROBOT_CONNECTION_EVENT_LENGTH 64U
 
@@ -420,29 +422,33 @@ static ModbusPortResult_e prvClearActionRange(ModbusPort_t *pxPort,
 static uint16_t prvRobotStartupStateMask(void);
 static ModbusPortResult_e prvWriteControlValue(ModbusPort_t *pxPort,
 	uint16_t usCoil, bool bValue, uint32_t ulTimeoutMs);
+static void prvResetRobotLinkHealth(void)
+{
+	s_ucRobotProtocolFailureCount = 0U;
+	s_ucRobotNoResponseCount = 0U;
+}
+
+/*-----------------------------------------------------------*/
 static uint8_t prvRobotLinkFailureConfirmed(ModbusPort_t *pxPort,
 	ModbusPortResult_e xResult, uint8_t *pucProbeAttempted)
 {
 	ModbusPortFault_t xFault;
+	ModbusPortFault_t xProbeFault;
 	ModbusPortResult_e xProbeResult;
-	uint8_t ucProbeIndex;
-	uint8_t ucProbeNeeded;
 	bool bProbe;
 
 	if (pucProbeAttempted != NULL) {
 		*pucProbeAttempted = 0U;
 	}
-	if ((pxPort == NULL) || (xResult == MODBUS_PORT_RESULT_OK)) {
+	if (pxPort == NULL) {
+		return 0U;
+	}
+	if (xResult == MODBUS_PORT_RESULT_OK) {
+		prvResetRobotLinkHealth();
 		return 0U;
 	}
 	memset(&xFault, 0, sizeof(xFault));
 	vModbusPortGetLastFault(pxPort, &xFault);
-	if ((xResult != MODBUS_PORT_RESULT_TIMEOUT) &&
-		(xResult != MODBUS_PORT_RESULT_TRANSPORT) &&
-		(xResult != MODBUS_PORT_RESULT_PROTOCOL) &&
-		(xResult != MODBUS_PORT_RESULT_NOT_READY)) {
-		return 0U;
-	}
 	if ((xFault.xTransportResult == TRANSPORT_RESULT_DISCONNECTED) ||
 		(xFault.xTransportResult == TRANSPORT_RESULT_NOT_OPEN) ||
 		(xFault.xTransportResult == TRANSPORT_RESULT_NOT_READY) ||
@@ -451,44 +457,81 @@ static uint8_t prvRobotLinkFailureConfirmed(ModbusPort_t *pxPort,
 			COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_LINK_CONFIRMED_LOST",
 			(int32_t)xResult, "transport_result",
 			(int32_t)xFault.xTransportResult);
+		prvResetRobotLinkHealth();
 		return 1U;
 	}
-	ucProbeNeeded = ((xResult == MODBUS_PORT_RESULT_TIMEOUT) ||
-		(xResult == MODBUS_PORT_RESULT_PROTOCOL) ||
-		((xResult == MODBUS_PORT_RESULT_TRANSPORT) &&
-		 (xFault.xTransportResult == TRANSPORT_RESULT_TIMEOUT)) ||
-		(xFault.xTransportResult == TRANSPORT_RESULT_TIMEOUT)) ? 1U : 0U;
-	if (ucProbeNeeded == 0U) {
+	if ((xResult != MODBUS_PORT_RESULT_TIMEOUT) &&
+		(xResult != MODBUS_PORT_RESULT_PROTOCOL) &&
+		(xFault.xTransportResult != TRANSPORT_RESULT_TIMEOUT)) {
 		return 0U;
+	}
+	if (xResult == MODBUS_PORT_RESULT_PROTOCOL) {
+		if (s_ucRobotProtocolFailureCount < UINT8_MAX) {
+			s_ucRobotProtocolFailureCount++;
+		}
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_ROBOT, COFFEE3_LOG_ORDER_SYSTEM,
+			"ROBOT_FRAME_DROPPED result=%d protocol_code=%ld count=%u",
+			(int)xResult, (long)xFault.lProtocolCode,
+			(unsigned int)s_ucRobotProtocolFailureCount);
+	} else if (s_ucRobotNoResponseCount < UINT8_MAX) {
+		s_ucRobotNoResponseCount++;
 	}
 	if (pucProbeAttempted != NULL) {
 		*pucProbeAttempted = 1U;
 	}
-	for (ucProbeIndex = 0U;
-		ucProbeIndex < COFFEE3_ROBOT_LINK_PROBE_COUNT; ucProbeIndex++) {
-		bProbe = false;
-		xProbeResult = xModbusPortReadCoils(pxPort,
-			COFFEE3_ROBOT_UNIT_ID, 3100U, 1U, &bProbe,
-			COFFEE3_ROBOT_IO_TIMEOUT_MS);
-		if (xProbeResult == MODBUS_PORT_RESULT_OK) {
-			(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_INFO,
-				COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_LINK_PROBE_OK", 0,
-				"attempt", (int32_t)(ucProbeIndex + 1U));
-			return 0U;
+	bProbe = false;
+	xProbeResult = xModbusPortReadCoils(pxPort,
+		COFFEE3_ROBOT_UNIT_ID, 3100U, 1U, &bProbe,
+		COFFEE3_ROBOT_IO_TIMEOUT_MS);
+	if (xProbeResult == MODBUS_PORT_RESULT_OK) {
+		prvResetRobotLinkHealth();
+		(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_LINK_PROBE_OK", 0);
+		return 0U;
+	}
+	memset(&xProbeFault, 0, sizeof(xProbeFault));
+	vModbusPortGetLastFault(pxPort, &xProbeFault);
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+		COFFEE3_LOG_SOURCE_ROBOT, COFFEE3_LOG_ORDER_SYSTEM,
+		"ROBOT_LINK_PROBE_FAILED result=%d transport=%d protocol=%ld",
+		(int)xProbeResult, (int)xProbeFault.xTransportResult,
+		(long)xProbeFault.lProtocolCode);
+	if ((xProbeFault.xTransportResult == TRANSPORT_RESULT_DISCONNECTED) ||
+		(xProbeFault.xTransportResult == TRANSPORT_RESULT_NOT_OPEN) ||
+		(xProbeFault.xTransportResult == TRANSPORT_RESULT_NOT_READY) ||
+		(xProbeFault.xTransportResult == TRANSPORT_RESULT_IO_ERROR)) {
+		prvResetRobotLinkHealth();
+		return 1U;
+	}
+	if (xProbeResult == MODBUS_PORT_RESULT_PROTOCOL) {
+		if (s_ucRobotProtocolFailureCount < UINT8_MAX) {
+			s_ucRobotProtocolFailureCount++;
 		}
-		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_WARNING,
-			COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_LINK_PROBE_FAILED",
-			(int32_t)xProbeResult, "attempt",
-			(int32_t)(ucProbeIndex + 1U));
-		if ((ucProbeIndex + 1U) < COFFEE3_ROBOT_LINK_PROBE_COUNT) {
-			vTaskDelay(pdMS_TO_TICKS(COFFEE3_ROBOT_LINK_PROBE_DELAY_MS));
+	} else if ((xProbeResult == MODBUS_PORT_RESULT_TIMEOUT) ||
+		(xProbeFault.xTransportResult == TRANSPORT_RESULT_TIMEOUT)) {
+		if (s_ucRobotNoResponseCount < UINT8_MAX) {
+			s_ucRobotNoResponseCount++;
 		}
 	}
-	(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_ERROR,
-		COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_LINK_CONFIRMED_LOST",
-		(int32_t)xResult, "attempts",
-		(int32_t)COFFEE3_ROBOT_LINK_PROBE_COUNT);
-	return 1U;
+	if (s_ucRobotProtocolFailureCount >=
+		COFFEE3_ROBOT_PROTOCOL_FAILURE_LIMIT) {
+		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_ERROR,
+			COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_PROTOCOL_DESYNC_RESET",
+			(int32_t)xProbeResult, "frames",
+			(int32_t)s_ucRobotProtocolFailureCount);
+		prvResetRobotLinkHealth();
+		return 1U;
+	}
+	if (s_ucRobotNoResponseCount >= COFFEE3_ROBOT_NO_RESPONSE_LIMIT) {
+		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_ERROR,
+			COFFEE3_LOG_SOURCE_ROBOT, "ROBOT_SESSION_UNRESPONSIVE",
+			(int32_t)xProbeResult, "timeouts",
+			(int32_t)s_ucRobotNoResponseCount);
+		prvResetRobotLinkHealth();
+		return 1U;
+	}
+	return 0U;
 }
 
 /*-----------------------------------------------------------*/
@@ -546,6 +589,7 @@ BaseType_t xCoffee3RobotTcpInitialize(void)
 {
 	s_ucFreshReadyReset = 0U;
 	s_ucConnectionStartupPending = 0U;
+	prvResetRobotLinkHealth();
 	memset(&g_xCoffee3RobotTcpStatus, 0,
 		sizeof(g_xCoffee3RobotTcpStatus));
 	memset(&g_xCoffee3RobotData, 0, sizeof(g_xCoffee3RobotData));
@@ -1368,14 +1412,29 @@ static int32_t prvRobotSessionProbe(void *pvOwnerContext,
 {
 	Coffee3RobotSessionContext_t *pxContext;
 	ModbusPortResult_e xResult;
+	ModbusPortFault_t xFault;
+	uint8_t ucAttempt;
 
 	pxContext = (Coffee3RobotSessionContext_t *)pvOwnerContext;
 	if ((pxContext == NULL) || (pxContext->pxPort == NULL)) {
 		return (int32_t)MODBUS_PORT_RESULT_INVALID_ARG;
 	}
 	/* TCP reachability is independent of program RUNNING/3100 readiness. */
-	xResult = xModbusPortWriteCoil(pxContext->pxPort,
-		COFFEE3_ROBOT_UNIT_ID, 3100U, false, ulTimeoutMs);
+	xResult = MODBUS_PORT_RESULT_PROTOCOL;
+	for (ucAttempt = 0U;
+		ucAttempt < COFFEE3_ROBOT_PROTOCOL_FAILURE_LIMIT; ucAttempt++) {
+		xResult = xModbusPortWriteCoil(pxContext->pxPort,
+			COFFEE3_ROBOT_UNIT_ID, 3100U, false, ulTimeoutMs);
+		if (xResult != MODBUS_PORT_RESULT_PROTOCOL) {
+			break;
+		}
+		memset(&xFault, 0, sizeof(xFault));
+		vModbusPortGetLastFault(pxContext->pxPort, &xFault);
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_ROBOT, COFFEE3_LOG_ORDER_SYSTEM,
+			"ROBOT_PROTOCOL_CHECK_FRAME_DROPPED protocol=%ld attempt=%u",
+			(long)xFault.lProtocolCode, (unsigned int)(ucAttempt + 1U));
+	}
 	s_ucFreshReadyReset = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
 	g_xCoffee3RobotData.aucControlCoils[0U] = 0U;
 	(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO, COFFEE3_LOG_SOURCE_ROBOT,
@@ -1432,6 +1491,7 @@ static void prvRobotSessionEvent(void *pvOwnerContext,
 	}
 	if ((xPreviousState == TCP_CLIENT_SESSION_PROTOCOL_CHECK) &&
 		(xCurrentState == TCP_CLIENT_SESSION_ONLINE)) {
+		prvResetRobotLinkHealth();
 		g_xCoffee3RobotTcpStatus.ulConsecutiveFailures = 0U;
 		g_xCoffee3RobotTcpStatus.ulNextRetryDelayMs = 0U;
 		vCoffee3DeviceSetOnline(COFFEE3_DEVICE_ROBOT, 1U);
@@ -2050,6 +2110,7 @@ static ModbusPortResult_e prvReconcile(ModbusPort_t *pxPort,
 static void prvDisconnectRobot(TcpClientSession_t *pxSession,
 	int32_t lReason)
 {
+	prvResetRobotLinkHealth();
 	vTcpClientSessionForceReconnect(pxSession, lReason);
 }
 

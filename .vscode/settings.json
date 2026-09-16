@@ -1,6 +1,6 @@
 {
     "cmake.sourceDirectory": "${workspaceFolder}/GCC-ARM",
     "cmake.cmakePath": "${workspaceFolder}/GCC-ARM/.tools/python/cmake/data/bin/cmake.exe",
-    "commentTranslate.source": "DarkCWK.youdao-youdao",
+    "commentTranslate.source": "Bing",
     "commentTranslate.targetLanguage": "zh-CN"
 }

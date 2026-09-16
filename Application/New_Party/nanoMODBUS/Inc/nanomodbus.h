@@ -251,27 +251,27 @@ typedef struct nmbs_callbacks {
  */
 struct nmbs_t {
     struct {
-        uint8_t buf[260];
-        uint16_t buf_idx;
+        uint8_t buf[260];       // Buffer for the current request/response message. It is used to store the request/response data, including the
+        uint16_t buf_idx;       // Index of the next byte to read/write in buf
 
-        uint8_t unit_id;
-        uint8_t fc;
-        uint16_t transaction_id;
-        bool broadcast;
-        bool ignored;
-        bool complete;
-    } msg;
+        uint8_t unit_id;        // RTU unit ID of the current request/response
+        uint8_t fc;             // Function code of the current request/response
+        uint16_t transaction_id;  // TCP only: transaction ID of the current request/response
+        bool broadcast;  // Whether the request is a broadcast and should not be responded to
+        bool ignored;  // Whether the request/response is ignored and should not be processed
+        bool complete; // Whether the request/response is complete and ready to be processed
+    } msg; // Current request/response message
 
-    nmbs_callbacks callbacks;
+    nmbs_callbacks callbacks;   // Server: request callbacks. Client: not used.
 
-    int32_t byte_timeout_ms;
-    int32_t read_timeout_ms;
+    int32_t byte_timeout_ms;    // Timeout between two consecutive bytes. If < 0, timeout is disabled.
+    int32_t read_timeout_ms;    // Timeout for the next request/response. If < 0, timeout is disabled.
 
-    nmbs_platform_conf platform;
+    nmbs_platform_conf platform; // Platform configuration, including read/write functions and user data
 
-    uint8_t address_rtu;
-    uint8_t dest_address_rtu;
-    uint16_t current_tid;
+    uint8_t address_rtu;        // Server: 此服务器实例的 RTU 地址；如果传输方式不是 RTU，则为 0
+    uint8_t dest_address_rtu;   // Client: 下一个请求将要发送到的服务器的 RTU 地址
+    uint16_t current_tid;       // 当前这一帧实际使用的 TID
 };
 
 /**

@@ -635,23 +635,32 @@ flowchart TB
 
     API["nmbs_xxx()"]
 
-    CHECK["① 参数检查"]
+    COMMON["共享/专用请求函数<br/>read_discrete()<br/>read_registers()<br/>..."]
 
-    PREP["② msg_state_req()<br/>准备事务"]
+    CHECK["参数检查"]
 
-    BUILD["③ put_req_header + put_xxx<br/>构造请求"]
+    PREP["msg_state_req() <br/>构造事务上下文"]
 
-    SEND["④ send_msg()<br/>发送"]
+    BUILD["put_req_header()<br/>put_xxx()写入缓冲区"]
 
-    HEADER["⑤ recv_res_header()<br/>验证响应身份"]
+    SEND["send_msg()<br/>发送完整的请求"]
 
-    BODY["⑥ recv_xxx_res()<br/>解析具体功能码数据"]
+    PARSER["recv_xxx_res()<br/>具体 FC 响应解析器"]
 
-    FOOTER["⑦ recv_msg_footer()<br/>CRC/帧完整性"]
+    HEADER["recv_res_header()<br/>公共响应身份/Exception"]
 
-    RESULT["⑧ 返回 nmbs_error / 数据"]
+    DATA["recv() + get_xxx()<br/>解析 FC Payload"]
 
-    API --> CHECK --> PREP --> BUILD --> SEND --> HEADER --> BODY --> FOOTER --> RESULT
+    FOOTER["recv_msg_footer()<br/>RTU CRC / TCP no-op"]
+
+    RESULT["返回"]
+
+    API --> COMMON --> CHECK --> PREP --> BUILD --> SEND --> PARSER
+
+    PARSER --> HEADER
+    PARSER --> DATA
+    PARSER --> FOOTER
+    PARSER --> RESULT
 ```
 
 这张图是 Client 侧最重要的主干。
