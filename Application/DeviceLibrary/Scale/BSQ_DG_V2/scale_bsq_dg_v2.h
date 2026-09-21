@@ -4,8 +4,8 @@
   * @author    WHong
   * @date      2026-08-21
   *
-  * @details   The normalized weight is expressed in 0.1 gram units.  The
-  *            driver accepts only the documented gram and kilogram unit
+  * @details   The image keeps both whole-gram and 0.1 gram normalized values.
+  *            The driver accepts only the documented gram and kilogram unit
   *            codes and keeps the raw protocol fields for diagnostics.
   */
 
@@ -28,6 +28,7 @@ extern "C" {
 /** @brief Store raw and normalized BSQ-DG-V2 weight values. */
 typedef struct {
 	int16_t sRawValue;
+	int32_t lWeightGram;
 	int32_t lWeightTenthGram;
 	uint16_t usDecimalPlaces;
 	uint16_t usUnit;
@@ -46,6 +47,17 @@ extern const DeviceDriverDescriptor_t g_xScaleBsqDgV2Driver;
   * @retval MODBUS_PORT_RESULT_PROTOCOL Decimal or unit code is unsupported.
   */
 ModbusPortResult_e xScaleBsqDgV2Refresh(ModbusPort_t *pxPort,
+	uint8_t ucUnitId, uint32_t ulTimeoutMs,
+	ScaleBsqDgV2Image_t *pxImage);
+
+/**
+  * @brief  Read the BSQ-DG-V2 registers with raw values interpreted as grams.
+  * @details The reported unit register is preserved in pxImage->usUnit for
+  *          diagnostics. pxImage->lWeightGram provides the Coffee1-compatible
+  *          whole-gram value even if the unit register is configured
+  *          differently.
+  */
+ModbusPortResult_e xScaleBsqDgV2RefreshGram(ModbusPort_t *pxPort,
 	uint8_t ucUnitId, uint32_t ulTimeoutMs,
 	ScaleBsqDgV2Image_t *pxImage);
 

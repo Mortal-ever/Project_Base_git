@@ -57,6 +57,7 @@ extern "C" {
 #define COFFEE3_REG_COFFEE_PICKUP_TIME        0x0043U
 #define COFFEE3_REG_AUXILIARY_TANK_PUMP       0x004EU
 #define COFFEE3_REG_COFFEE_MACHINE_TYPE       0x004FU
+/* FC03/06/16: persisted ice slope in ms/g; 0 restores 10, valid 1..50. */
 #define COFFEE3_REG_ICE_COEFFICIENT           0x007EU
 #define COFFEE3_REG_ICE_MACHINE_TYPE          0x007FU
 #define COFFEE3_REG_HOT_WATER_START            0x0080U

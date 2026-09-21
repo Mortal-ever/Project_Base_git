@@ -1,35 +1,18 @@
-很好，这次继续沿用我们前面已经确定下来的 **“主干 → 分支 → 叶子 → 函数索引”** 方式。
-
-而且 `Transport` 比前两个模块更适合用这种方法，因为它本身其实不是一个简单的 `.c/.h`：
-
-```text
-Transport
-│
-├── transport.h / transport.c
-│   └── 通用抽象层
-│
-├── transport_uart.h / transport_uart.c
-│   └── UART / RS485 后端
-│
-└── transport_tcp.h / transport_tcp.c
-    ├── LwIP Netconn 后端
-    └── LwIP Socket 会话后端
-```
-
-如果直接按照源码文件顺序看，很容易陷进 HAL、FreeRTOS、LwIP 的细节里，反而看不到作者真正搭出来的 **C 语言“接口 + 对象 + 多态 + 调度 + IO + 诊断”框架**。
-
----
-
 # Transport 架构知识图谱
 
-> 基于当前工程中的：
+> Transport
+> │
+> ├── transport.h / transport.c
+> │   └── 通用抽象层
+> │
+> ├── transport_uart.h / transport_uart.c
+> │   └── UART / RS485 后端
+> │
+> └── transport_tcp.h / transport_tcp.c
+>     ├── LwIP Netconn 后端
+>     └── LwIP Socket 会话后端
 >
-> `transport.h`
-> `transport.c`
-> `transport_uart.h`
-> `transport_uart.c`
-> `transport_tcp.h`
-> `transport_tcp.c`
+> C 语言“接口 + 对象 + 多态 + 调度 + IO + 诊断”框架
 
 ---
 

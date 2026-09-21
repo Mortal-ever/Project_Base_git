@@ -7,6 +7,7 @@
 
 #include "coffee3_device.h"
 #include "coffee3_robot_tcp.h"
+#include "coffee3_rtu_bus.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -249,6 +250,12 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 		(pxBinding->ucRouteId >= COFFEE3_ROUTE_COUNT)) {
 		return pdFAIL;
 	}
+	if ((pxBinding->ucRouteId >= 2U) &&
+		(pxBinding->ucRouteId <= 5U)) {
+		/* A queued foreground command wakes the owner and abandons only an
+		 * active background read. The UART remains owned by the bus task. */
+		vCoffee3RtuBusRequestPreempt(pxBinding->ucRouteId);
+	}
 	xQueue = s_axRouteQueues[pxBinding->ucRouteId];
 	if (xQueue == NULL) {
 		return pdFAIL;
@@ -436,9 +443,9 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 		pxStatus->ucRobotPhase = (uint8_t)COFFEE3_ROBOT_PHASE_IDLE;
 		pxStatus->ucRobotAccepted = 0U;
 	}
-	if ((lResult == 0) || (lResult == -6) || (lResult == -7)) {
-		pxStatus->ucOnline = 1U;
-	}
+	/* RTU online/offline is owned by the Bus health poll. A foreground
+	 * command completion, including a protocol/device fault, must not turn a
+	 * device online or keep an offline device online by side effect. */
 	if (lResult == 0) {
 		pxStatus->ulLastSuccessTick = (uint32_t)xTaskGetTickCount();
 	} else {

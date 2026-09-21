@@ -1,28 +1,16 @@
-对，这个调整很关键。上一版更像“**把源码分类整理好了**”，但还不是最适合人学习的知识地图。人的阅读通常不是一上来就看 `nmbs_error → bitfield → struct → API`，而是先回答：
-
-> **这东西到底是什么？我要看哪几部分？一笔 Modbus 通信怎么跑起来？然后我才需要知道这些结构体和函数为什么存在。**
-
-所以这一版我把结构彻底换成 **“主干 → 分支 → 叶子”**：
-
-```text
-先建立整体模型
-        ↓
-知道 nanoMODBUS 有哪几根主干
-        ↓
-沿 Client / Server 两条主流程走一遍
-        ↓
-再拆 Buffer / Frame / Platform / Callback / Error / Timeout
-        ↓
-最后进入函数级索引
-```
-
-这样以后 `ModbusPort` 和 `Transport` 也可以完全沿用这个模板。
-
-------
-
 # nanoMODBUS 架构知识图谱
 
 > 基于当前工程中的 `nanomodbus.h`、`nanomodbus.c`、`nanomodbus_config.h`
+>
+> 先建立整体模型
+>         ↓
+> 知道 nanoMODBUS 有哪几根主干
+>         ↓
+> 沿 Client / Server 两条主流程走一遍
+>         ↓
+> 再拆 Buffer / Frame / Platform / Callback / Error / Timeout
+>         ↓
+> 最后进入函数级索引
 
 ------
 

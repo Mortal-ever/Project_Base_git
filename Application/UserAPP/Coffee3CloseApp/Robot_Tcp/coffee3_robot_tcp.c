@@ -826,7 +826,7 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 				 xTransaction.xMotionDeadline : xTransaction.xAcceptDeadline)) >= 0)) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_ROBOT, (uint16_t)xTransaction.xCommand.ulOrderId,
-				"Robot action timeout: action=%u command_id=%lu accepted=%u; inspect robot before recovery",
+			"Robot timeout: action=%u command=%lu accepted=%u; inspect before recovery",
 				xTransaction.xCommand.usAction,
 				(unsigned long)xTransaction.xCommand.ulCommandId,
 				xTransaction.ucAccepted);
@@ -1212,7 +1212,7 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 						xStartupOutcome = COFFEE3_ROBOT_STARTUP_OK;
 						(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 							COFFEE3_LOG_SOURCE_ROBOT, (uint16_t)xCommand.ulOrderId,
-							"Order requires robot startup: power/enable/run/alarm state not suitable");
+			"Robot start required: power/enable/run/alarm not ready");
 						xResult = prvStartup(&xPort, 0U, &xStartupOutcome);
 						if ((xResult == MODBUS_PORT_RESULT_OK) &&
 							(xStartupOutcome != COFFEE3_ROBOT_STARTUP_OK)) {

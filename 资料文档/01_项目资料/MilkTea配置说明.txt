@@ -1,4 +1,5 @@
 >>以下是MilkTeaTarget 使用到的设备以及协议:
+MilkTea Server: 监听端口6001 和当前的工程一致 开四个slot
 
 robot1: robot寄存器整理.xlsx 越疆协议2;越疆本体状态以及命令;
 robot2: robot寄存器整理.xlsx 越疆协议3;越疆本体状态以及命令;
@@ -14,8 +15,8 @@ robot3: robot寄存器整理.xlsx robot3是节卡协议;节卡本体状态以及
 落盖机: 使用IO电机控制 负责落盖和压盖功能
 电能表:  串口3 9600 ModbusRTU从站号2 电能表-DDSU666昆仑新国标单相导轨表使用说明书(2P)-202310 (4).pdf 
 
-蒸汽机: 串口4 9600 ModbusRTU从站号1 单屏双头蒸汽机Modbus通信协议说明.docx 
-封膜机: 串口4 9600 ModbusRTU从站号2 封口机内部通信协议手册.docx 
+封膜机: 串口4 38400 ModbusRTU从站号1 封口机内部通信协议手册.docx 
+蒸汽机: 串口4 38400 ModbusRTU从站号2 单屏双头蒸汽机Modbus通信协议说明.docx 
 
 输入IO模块: 串口5 38400 ModbusRTU从站号1 IO模块-数字量输入输出系列使用手册(RS485&RS232版).pdf 
 输出IO模块: 串口5 38400 ModbusRTU从站号1 IO模块-数字量输入输出系列使用手册(RS485&RS232版).pdf 

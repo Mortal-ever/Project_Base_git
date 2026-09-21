@@ -24,11 +24,11 @@
 /** @brief Fixed number of records retained by the overwrite ring. */
 #define APP_LOG_RING_LENGTH             32U
 /** @brief Maximum event text bytes retained, including the terminator. */
-#define APP_LOG_TEXT_LENGTH             72U
+#define APP_LOG_TEXT_LENGTH             96U
 /** @brief Maximum field-name bytes retained, including the terminator. */
 #define APP_LOG_FIELD_LENGTH            24U
 /** @brief Maximum formatted output line length in bytes. */
-#define APP_LOG_LINE_LENGTH             160U
+#define APP_LOG_LINE_LENGTH             192U
 /** @brief Bounded Transport send timeout in milliseconds. */
 #define APP_LOG_SEND_TIMEOUT_MS         100U
 /** @brief Initial delay between retries after a send failure. */

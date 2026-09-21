@@ -254,6 +254,8 @@ BaseType_t xCoffee3ServerInitialize(void)
 		s_ausCommandRegisters[COFFEE3_REG_FRUIT_COEFFICIENT_FIRST +
 			ucIndex] = usCoffee3ConfigFruitCoefficient(ucIndex + 1U);
 	}
+	s_ausCommandRegisters[COFFEE3_REG_ICE_COEFFICIENT] =
+		usCoffee3ConfigIceSlopeMsPerGram();
 	memset(s_ausStatusRegisters, 0,
 		sizeof(s_ausStatusRegisters));
 	memset(s_ausUpgradeRegisters, 0,
@@ -928,7 +930,6 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 	case COFFEE3_REG_COFFEE_MACHINE_TYPE:
 	case 0x0047U: case 0x0061U: case 0x0062U: case 0x0063U:
 	case 0x0070U: case 0x0071U:
-	case COFFEE3_REG_ICE_COEFFICIENT:
 	case COFFEE3_REG_ICE_MACHINE_TYPE:
 	case 0x0080U: case 0x0081U: case 0x0082U: case 0x0083U:
 	case 0x00A2U: case 0x00A3U: case 0x00A4U:
@@ -969,6 +970,12 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 	case 0x009DU:
 		if (usValue <= 1U) { return NMBS_ERROR_NONE; }
 		break;
+	case COFFEE3_REG_ICE_COEFFICIENT:
+		/* Zero restores the default; larger values are milliseconds per gram. */
+		if (usValue <= COFFEE3_CONFIG_ICE_SLOPE_MAX_MS_PER_GRAM) {
+			return NMBS_ERROR_NONE;
+		}
+		break;
 	case 0x00A1U:
 		if ((usValue == 0U) || (usValue == 1U) || (usValue == 0x10U)) {
 			return NMBS_ERROR_NONE;
@@ -1001,6 +1008,8 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 	uint16_t usIndex;
 	uint8_t ucCoefficientIndex;
 	uint8_t ucRobotMotionAccepted;
+	uint16_t usIceSlope;
+	ConfigStoreResult_e xConfigResult;
 	nmbs_error xValidation;
 
 	if ((pusRegisters == NULL) || (usQuantity == 0U)) {
@@ -1133,6 +1142,32 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
 			}
 		}
+		if ((usAddress <= COFFEE3_REG_ICE_COEFFICIENT) &&
+			(ulEndAddress > COFFEE3_REG_ICE_COEFFICIENT)) {
+			usIceSlope = pusRegisters[
+				COFFEE3_REG_ICE_COEFFICIENT - usAddress];
+			if (usIceSlope == 0U) {
+				usIceSlope =
+					COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM;
+			}
+			if (usIceSlope != usCoffee3ConfigIceSlopeMsPerGram()) {
+				if (xCoffee3WorkflowAcquireManual() != pdPASS) {
+					return prvRejectCommand(
+						COFFEE3_REG_ICE_COEFFICIENT,
+						usIceSlope,
+						"ice calibration requires idle workflow",
+						NMBS_EXCEPTION_SERVER_DEVICE_FAILURE);
+				}
+				xConfigResult = xCoffee3ConfigSetIceSlopeMsPerGram(
+					usIceSlope);
+				vCoffee3WorkflowReleaseManual();
+			} else {
+				xConfigResult = CONFIG_STORE_OK;
+			}
+			if (xConfigResult != CONFIG_STORE_OK) {
+				return NMBS_EXCEPTION_SERVER_DEVICE_FAILURE;
+			}
+		}
 		if ((usAddress <= COFFEE3_REG_COFFEE_WATER_PUMP) &&
 			(ulEndAddress > COFFEE3_REG_COFFEE_WATER_PUMP)) {
 			usIndex = (uint16_t)(COFFEE3_REG_COFFEE_WATER_PUMP -
@@ -1158,6 +1193,8 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 				ucCoefficientIndex] = usCoffee3ConfigFruitCoefficient(
 					ucCoefficientIndex + 1U);
 		}
+		s_ausCommandRegisters[COFFEE3_REG_ICE_COEFFICIENT] =
+			usCoffee3ConfigIceSlopeMsPerGram();
 		if (ucRobotMotionAccepted != 0U) {
 			s_ausCommandRegisters[0x0031U] = 0U;
 		}
@@ -1166,7 +1203,9 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		if ((usAddress <= COFFEE3_REG_SYRUP_4) ||
 			(usAddress > COFFEE3_CONFIG_STORAGE_REGISTER) ||
 			(ulEndAddress <= COFFEE3_CONFIG_STORAGE_REGISTER)) {
-			if (!((usAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
+			if (!((usAddress == COFFEE3_REG_ICE_COEFFICIENT) &&
+				(usQuantity == 1U)) &&
+				!((usAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
 				(ulEndAddress <=
 					(uint32_t)COFFEE3_REG_FRUIT_COEFFICIENT_LAST + 1U))) {
 				prvEvaluateOrder();
@@ -1321,7 +1360,7 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 		if (xCoffee3WorkflowSubmitStoragePickup(usValue) != pdPASS) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
-				"Storage pickup rejected: slot=%u; workflow/outlet busy or invalid slot",
+				"Pickup rejected: slot=%u busy or invalid",
 				(unsigned int)usValue);
 		}
 	}
@@ -1480,25 +1519,14 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 	}
 	if ((usAddress <= 0x0070U) && (ulEndAddress > 0x0070U) &&
 		(s_ausCommandRegisters[0x0070U] != 0U)) {
-		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
-			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			"MANUAL_CUP_ASSUMED", 0,
-			"target_dg",
-			(int32_t)s_ausCommandRegisters[0x0071U]);
 		if (xCoffee3WorkflowSubmitManualIce(
 			s_ausCommandRegisters[0x0071U]) == pdPASS) {
 			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
 				"MANUAL_ICE_ACCEPTED", 0,
-				"target_dg",
+				"target_g",
 				(int32_t)s_ausCommandRegisters[0x0071U]);
 			s_ausCommandRegisters[0x0070U] = 0U;
-		} else {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-				"MANUAL_ICE_REJECTED", -1,
-				"target_dg",
-				(int32_t)s_ausCommandRegisters[0x0071U]);
 		}
 	}
 	if ((usAddress <= COFFEE3_REG_HOT_WATER_START) &&
@@ -1630,9 +1658,6 @@ static void prvLogCompatibilityWrites(uint16_t usAddress,
 		case COFFEE3_REG_COFFEE_MACHINE_TYPE:
 			pcReason = "coffee machine remains fixed to M50";
 			break;
-		case COFFEE3_REG_ICE_COEFFICIENT:
-			pcReason = "ice coefficient is accepted but not applied";
-			break;
 		case COFFEE3_REG_ICE_MACHINE_TYPE:
 			pcReason = "ice-machine driver remains fixed";
 			break;
@@ -1652,7 +1677,7 @@ static void prvLogCompatibilityWrites(uint16_t usAddress,
 			} else {
 				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-					"Command accepted without product action: address=%u value=%u; %s",
+				"Command accepted; no product action: address=%u value=%u; %s",
 					(unsigned int)usCurrentAddress,
 					(unsigned int)usValue, pcReason);
 			}
@@ -1950,10 +1975,10 @@ static void prvRefreshStatusRegisters(void)
 	EventBits_t xLidEvents;
 	EventBits_t xSyrupEvents;
 	EventBits_t xIceEvents;
-	EventBits_t xScaleEvents;
 	uint16_t usIoStatus;
 	uint16_t usMachineStatus;
 	uint16_t usFault;
+	uint8_t ucIceFaultMask;
 	uint16_t usCupState;
 	uint16_t usLidState;
 	uint16_t usCupFault;
@@ -1980,7 +2005,7 @@ static void prvRefreshStatusRegisters(void)
 	xSyrupEvents = xCoffee3DeviceGetEvents(
 		COFFEE3_DEVICE_SYRUP_MACHINE);
 	xIceEvents = xCoffee3DeviceGetEvents(COFFEE3_DEVICE_ICE_MACHINE);
-	xScaleEvents = xCoffee3DeviceGetEvents(COFFEE3_DEVICE_SCALE);
+	ucIceFaultMask = ucIceMachineGetFaultMask(&g_xCoffee3IceImage);
 	usCupFault =
 		(g_xCoffee3CupLidImage.aucCupCoils[0] == 0U ? 0x0001U : 0U) |
 		(g_xCoffee3CupLidImage.aucCupCoils[1] != 0U ? 0x0010U : 0U) |
@@ -2201,11 +2226,17 @@ static void prvRefreshStatusRegisters(void)
 			g_xCoffee3SyrupImage.ausRegisters[11U + ucIndex];
 	}
 
-	s_ausStatusRegisters[0x0070U] =
-		((xIceEvents & COFFEE3_DEVICE_EVENT_COMMAND_FAILED) != 0U) ?
-		3U : (((xIceEvents & COFFEE3_DEVICE_EVENT_BUSY) != 0U) ?
-		2U : (((xIceEvents & COFFEE3_DEVICE_EVENT_ONLINE) != 0U) ?
-		1U : 0U));
+	if ((xIceEvents & COFFEE3_DEVICE_EVENT_ONLINE) == 0U) {
+		s_ausStatusRegisters[0x0070U] = 0U;
+	} else if (ucIceFaultMask != 0U) {
+		s_ausStatusRegisters[0x0070U] = 3U;
+	} else if ((xIceEvents & COFFEE3_DEVICE_EVENT_BUSY) != 0U) {
+		s_ausStatusRegisters[0x0070U] = 2U;
+	} else {
+		s_ausStatusRegisters[0x0070U] = 1U;
+	}
+	/* 0x1071..0x107E follow the Coffee1 host status contract. Fields not
+	 * provided by this ice-machine protocol are refreshed explicitly to 0. */
 	s_ausStatusRegisters[0x0071U] =
 		g_xCoffee3IceImage.ausRegisters[2];
 	s_ausStatusRegisters[0x0072U] =
@@ -2213,20 +2244,22 @@ static void prvRefreshStatusRegisters(void)
 	s_ausStatusRegisters[0x0073U] =
 		((xIceEvents & COFFEE3_DEVICE_EVENT_ONLINE) != 0U) &&
 		(g_xCoffee3IceImage.ausRegisters[1] == 0U) ? 1U : 0U;
-	usFault = g_xCoffee3IceImage.ausRegisters[3] |
-		g_xCoffee3IceImage.ausRegisters[4] |
-		g_xCoffee3IceImage.ausRegisters[5];
+	usFault = (ucIceFaultMask != 0U) ? 1U : 0U;
 	s_ausStatusRegisters[0x0074U] = usFault;
+	s_ausStatusRegisters[0x0075U] = 0U;
+	s_ausStatusRegisters[0x0076U] =
+		g_xCoffee3IceImage.ausRegisters[4];
+	s_ausStatusRegisters[0x0077U] = 0U;
 	s_ausStatusRegisters[0x0078U] =
 		g_xCoffee3IceImage.ausRegisters[3];
+	s_ausStatusRegisters[0x0079U] = 0U;
 	s_ausStatusRegisters[0x007AU] =
 		g_xCoffee3IceImage.ausRegisters[5];
+	s_ausStatusRegisters[0x007BU] = 0U;
 	s_ausStatusRegisters[0x007CU] =
 		g_xCoffee3IceImage.ausRegisters[10];
-	s_ausStatusRegisters[0x007DU] =
-		((xScaleEvents & (COFFEE3_DEVICE_EVENT_COMM_FAULT |
-		COFFEE3_DEVICE_EVENT_DEVICE_FAULT |
-		COFFEE3_DEVICE_EVENT_COMMAND_FAILED)) != 0U) ? 1U : 0U;
+	s_ausStatusRegisters[0x007DU] = 0U;
+	s_ausStatusRegisters[0x007EU] = 0U;
 	s_ausStatusRegisters[0x0080U] =
 		(xIoSnapshot.xInput.aucXPin[COFFEE3_LOCAL_DI_HOT_WATER_LOW] ==
 		0U) ? 1U : 0U;

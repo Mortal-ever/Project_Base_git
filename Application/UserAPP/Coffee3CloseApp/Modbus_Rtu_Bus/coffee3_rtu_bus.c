@@ -36,6 +36,15 @@ typedef struct {
 	TransportUartContext_t xTransport;
 	ModbusPort_t *pxPort;
 	TickType_t xLastTransactionTick;
+	TickType_t axNextPollTick[COFFEE3_DEVICE_COUNT];
+	uint8_t aucPollMisses[COFFEE3_DEVICE_COUNT];
+	uint8_t aucPollFaultMask[COFFEE3_DEVICE_COUNT];
+	uint8_t aucPollFaultKnown[COFFEE3_DEVICE_COUNT];
+	uint8_t aucPollIndex[COFFEE3_DEVICE_COUNT];
+	uint8_t ucPollCount;
+	uint8_t ucPollCursor;
+	uint8_t ucPollingActive;
+	volatile uint8_t ucPreemptRequested;
 	uint8_t ucCreated;
 } Coffee3RtuBusContext_t;
 
@@ -94,7 +103,6 @@ static Coffee3LogSource_e prvGetLogSource(uint8_t ucBusId);
   * @return Device-specific source, or system source for an invalid device.
   */
 static Coffee3LogSource_e prvGetDeviceLogSource(uint8_t ucDeviceId);
-static const char *prvGetDeviceName(uint8_t ucDeviceId);
 static const char *prvGetDeviceProtocolEvent(uint8_t ucDeviceId);
 static const char *prvGetBusLinkEvent(uint8_t ucBusId);
 static void prvLogDeviceBindings(const Coffee3RtuBusConfig_t *pxConfig);
@@ -123,6 +131,16 @@ static void prvLogIoWriteExpected(const Coffee3Command_t *pxCommand);
 static void prvLogIoWrite(const Coffee3Command_t *pxCommand,
 	ModbusPortResult_e xResult, const IoModuleModbusDigitalImage_t *pxImage);
 static uint8_t prvCommandCanceled(const void *pvContext);
+static const char *prvModbusResultName(ModbusPortResult_e xResult);
+static uint8_t prvPollPreempted(void *pvContext);
+static void prvInitializePollSchedule(Coffee3RtuBusContext_t *pxContext,
+	uint8_t ucBusId);
+static BaseType_t prvTryBackgroundPoll(Coffee3RtuBusContext_t *pxContext,
+	const Coffee3RtuBusConfig_t *pxConfig, Coffee3RtuBusStatus_t *pxStatus);
+static void prvPublishPollHealth(Coffee3RtuBusContext_t *pxContext,
+	const Coffee3RtuBusConfig_t *pxConfig,
+	const Coffee3Command_t *pxCommand, ModbusPortResult_e xResult);
+static const char *prvActionName(uint16_t usAction);
 
 /*-----------------------------------------------------------*/
 HAL_StatusTypeDef xCoffee3SerialApplyDefaults(void)
@@ -192,6 +210,261 @@ const Coffee3RtuBusConfig_t *pxCoffee3RtuBusGetConfig(uint8_t ucIndex)
 }
 
 /*-----------------------------------------------------------*/
+void vCoffee3RtuBusRequestPreempt(uint8_t ucBusId)
+{
+	uint8_t ucIndex;
+
+	ucIndex = prvFindBusIndex(ucBusId);
+	if (ucIndex < COFFEE3_RTU_BUS_COUNT) {
+		s_axBusContexts[ucIndex].ucPreemptRequested = 1U;
+	}
+}
+
+/*-----------------------------------------------------------*/
+static void prvInitializePollSchedule(Coffee3RtuBusContext_t *pxContext,
+	uint8_t ucBusId)
+{
+	static const Coffee3DeviceId_e axBus2[] = {
+		COFFEE3_DEVICE_COFFEE_MACHINE };
+	static const Coffee3DeviceId_e axBus3[] = {
+		COFFEE3_DEVICE_CUP_MACHINE, COFFEE3_DEVICE_SYRUP_MACHINE,
+		COFFEE3_DEVICE_LID_MACHINE, COFFEE3_DEVICE_POWER_METER };
+	static const Coffee3DeviceId_e axBus4[] = {
+		COFFEE3_DEVICE_ICE_MACHINE, COFFEE3_DEVICE_SCALE };
+	static const Coffee3DeviceId_e axBus5[] = {
+		COFFEE3_DEVICE_IO_INPUT, COFFEE3_DEVICE_IO_OUTPUT };
+	const Coffee3DeviceId_e *pxDevices;
+	uint8_t ucCount;
+	uint8_t ucIndex;
+	TickType_t xNow;
+	uint32_t ulStagger;
+
+	pxDevices = NULL;
+	ucCount = 0U;
+	if (ucBusId == 2U) {
+		pxDevices = axBus2;
+		ucCount = (uint8_t)(sizeof(axBus2) / sizeof(axBus2[0]));
+	} else if (ucBusId == 3U) {
+		pxDevices = axBus3;
+		ucCount = (uint8_t)(sizeof(axBus3) / sizeof(axBus3[0]));
+	} else if (ucBusId == 4U) {
+		pxDevices = axBus4;
+		ucCount = (uint8_t)(sizeof(axBus4) / sizeof(axBus4[0]));
+	} else if (ucBusId == 5U) {
+		pxDevices = axBus5;
+		ucCount = (uint8_t)(sizeof(axBus5) / sizeof(axBus5[0]));
+	}
+	if ((pxContext == NULL) || (pxDevices == NULL)) {
+		return;
+	}
+	pxContext->ucPollCount = ucCount;
+	pxContext->ucPollCursor = 0U;
+	xNow = xTaskGetTickCount();
+	for (ucIndex = 0U; ucIndex < ucCount; ucIndex++) {
+		ulStagger = (ucBusId == 5U) ?
+			((uint32_t)ucIndex * COFFEE3_RTU_IO_POLL_STAGGER_MS) :
+			((uint32_t)ucIndex * COFFEE3_RTU_POLL_STAGGER_MS);
+		pxContext->aucPollIndex[ucIndex] = (uint8_t)pxDevices[ucIndex];
+		pxContext->axNextPollTick[pxDevices[ucIndex]] = xNow +
+			pdMS_TO_TICKS(ulStagger);
+		pxContext->aucPollMisses[pxDevices[ucIndex]] = 0U;
+	}
+}
+
+/*-----------------------------------------------------------*/
+static uint8_t prvPollPreempted(void *pvContext)
+{
+	Coffee3RtuBusContext_t *pxContext;
+
+	pxContext = (Coffee3RtuBusContext_t *)pvContext;
+	return ((pxContext != NULL) &&
+		(pxContext->ucPreemptRequested != 0U) &&
+		(pxContext->ucPollingActive != 0U)) ? 1U : 0U;
+}
+
+/*-----------------------------------------------------------*/
+static BaseType_t prvTryBackgroundPoll(Coffee3RtuBusContext_t *pxContext,
+	const Coffee3RtuBusConfig_t *pxConfig, Coffee3RtuBusStatus_t *pxStatus)
+{
+	Coffee3Command_t xCommand;
+	Coffee3DeviceId_e xDeviceId;
+	ModbusPortResult_e xResult;
+	TickType_t xNow;
+	uint8_t ucIndex;
+	uint8_t ucOffset;
+	uint32_t ulPeriodMs;
+
+	if ((pxContext == NULL) || (pxConfig == NULL) ||
+		(pxStatus == NULL) || (pxContext->ucCreated == 0U) ||
+		(pxContext->ucPollCount == 0U) ||
+		(uxQueueMessagesWaiting(pxContext->xQueue) != 0U)) {
+		return pdFALSE;
+	}
+	xNow = xTaskGetTickCount();
+	ucIndex = pxContext->ucPollCursor;
+	if (ucIndex >= pxContext->ucPollCount) {
+		ucIndex = 0U;
+	}
+	for (ucOffset = 0U; ucOffset < pxContext->ucPollCount; ucOffset++) {
+		uint8_t ucCandidate;
+		ucCandidate = (uint8_t)((ucIndex + ucOffset) %
+			pxContext->ucPollCount);
+		xDeviceId = (Coffee3DeviceId_e)
+			pxContext->aucPollIndex[ucCandidate];
+		if ((int32_t)(xNow - pxContext->axNextPollTick[xDeviceId]) >= 0) {
+			ucIndex = ucCandidate;
+			break;
+		}
+	}
+	if (ucOffset >= pxContext->ucPollCount) {
+		return pdFALSE;
+	}
+	pxContext->ucPollCursor =
+		(uint8_t)((ucIndex + 1U) % pxContext->ucPollCount);
+	memset(&xCommand, 0, sizeof(xCommand));
+	xCommand.ucDeviceId = (uint8_t)xDeviceId;
+	xCommand.ucSource = (uint8_t)COFFEE3_COMMAND_SOURCE_MAINTENANCE;
+	xCommand.usAction = (uint16_t)COFFEE3_ACTION_REFRESH;
+	xCommand.ulTimeoutMs = (pxConfig->ucBusId == 5U) ?
+		COFFEE3_RTU_POLL_TIMEOUT_MS : COFFEE3_RTU_IO_TIMEOUT_MS;
+	pxContext->ucPollingActive = 1U;
+	pxContext->ucPreemptRequested = 0U;
+	pxStatus->ucActiveDevice = (uint8_t)xDeviceId;
+	vCoffee3DeviceCommandStarted(&xCommand);
+	xResult = prvExecute(pxContext,
+		pxCoffee3DeviceGetBinding(xDeviceId), &xCommand);
+	pxContext->ucPollingActive = 0U;
+	if (xResult == MODBUS_PORT_RESULT_PREEMPTED) {
+		(void)xTransportControl(&pxContext->xChannel,
+			TRANSPORT_CTRL_RX_FLUSH, NULL);
+		/* The request was sacrificed; keep the cursor on this device and
+		 * retry it after the foreground queue has drained. */
+		pxContext->ucPollCursor = ucIndex;
+		pxContext->axNextPollTick[xDeviceId] = xTaskGetTickCount() +
+			pdMS_TO_TICKS(1U);
+		vCoffee3DeviceCommandCompleted(&xCommand,
+			MODBUS_PORT_RESULT_PREEMPTED, 0U);
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			prvGetDeviceLogSource((uint8_t)xDeviceId),
+			COFFEE3_LOG_ORDER_SYSTEM,
+			"Status poll paused: id=%u reason=foreground command result=%d",
+			(unsigned int)pxCoffee3DeviceGetBinding(xDeviceId)->ucUnitId,
+			(int)xResult);
+		pxStatus->ucActiveDevice = 0U;
+		return pdTRUE;
+	}
+	prvPublishPollHealth(pxContext, pxConfig, &xCommand, xResult);
+	vCoffee3DeviceCommandCompleted(&xCommand, (int32_t)xResult,
+		(xResult == MODBUS_PORT_RESULT_TIMEOUT) ? 1U : 0U);
+	ulPeriodMs = (pxConfig->ucBusId == 5U) ?
+		COFFEE3_RTU_IO_POLL_PERIOD_MS : COFFEE3_RTU_POLL_PERIOD_MS;
+	pxContext->axNextPollTick[xDeviceId] = xTaskGetTickCount() +
+		pdMS_TO_TICKS(ulPeriodMs);
+	pxStatus->ucActiveDevice = 0U;
+	return pdTRUE;
+}
+
+/*-----------------------------------------------------------*/
+static void prvPublishPollHealth(Coffee3RtuBusContext_t *pxContext,
+	const Coffee3RtuBusConfig_t *pxConfig,
+	const Coffee3Command_t *pxCommand, ModbusPortResult_e xResult)
+{
+	const Coffee3DeviceBinding_t *pxBinding;
+	Coffee3DeviceId_e xDeviceId;
+	uint8_t ucLimit;
+	uint8_t ucMiss;
+	uint8_t ucWasOnline;
+	uint8_t ucReady;
+	uint8_t ucFaultMask;
+
+	if ((pxContext == NULL) || (pxConfig == NULL) || (pxCommand == NULL)) {
+		return;
+	}
+	xDeviceId = (Coffee3DeviceId_e)pxCommand->ucDeviceId;
+	pxBinding = pxCoffee3DeviceGetBinding(xDeviceId);
+	if (pxBinding == NULL) {
+		return;
+	}
+	ucWasOnline = g_axCoffee3DeviceStatus[xDeviceId].ucOnline;
+	ucLimit = (pxConfig->ucBusId == 5U) ?
+		COFFEE3_RTU_IO_OFFLINE_MISS_LIMIT :
+		COFFEE3_RTU_OFFLINE_MISS_LIMIT;
+	/* A valid Modbus exception still proves that the target responded. It is
+	 * online, but not ready for the requested operation. */
+	if ((xResult == MODBUS_PORT_RESULT_OK) ||
+		(xResult == MODBUS_PORT_RESULT_EXCEPTION)) {
+		pxContext->aucPollMisses[xDeviceId] = 0U;
+		vCoffee3DeviceSetOnline(xDeviceId, 1U);
+		ucReady = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
+		if ((xResult == MODBUS_PORT_RESULT_OK) &&
+			(xDeviceId == COFFEE3_DEVICE_ICE_MACHINE)) {
+			ucFaultMask = ucIceMachineGetFaultMask(&g_xCoffee3IceImage);
+			ucReady = (ucFaultMask == 0U) ? 1U : 0U;
+			if ((pxContext->aucPollFaultKnown[xDeviceId] == 0U) ||
+				(pxContext->aucPollFaultMask[xDeviceId] != ucFaultMask)) {
+				(void)xCoffee3LogPrintfOrder(
+					(ucFaultMask == 0U) ? COFFEE3_LOG_LEVEL_INFO :
+					COFFEE3_LOG_LEVEL_WARNING,
+					prvGetDeviceLogSource((uint8_t)xDeviceId),
+					COFFEE3_LOG_ORDER_SYSTEM,
+					"Fault changed: id=%u reason=%s mask=%u result=%d",
+					(unsigned int)pxBinding->ucUnitId,
+					pcIceMachineFaultReason(ucFaultMask),
+					(unsigned int)ucFaultMask, (int)xResult);
+			}
+			pxContext->aucPollFaultMask[xDeviceId] = ucFaultMask;
+			pxContext->aucPollFaultKnown[xDeviceId] = 1U;
+		}
+		vCoffee3DeviceSetReady(xDeviceId, ucReady);
+		if (ucWasOnline == 0U) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				prvGetDeviceLogSource((uint8_t)xDeviceId),
+				COFFEE3_LOG_ORDER_SYSTEM,
+				"Device online: id=%u reason=health poll recv result=%d",
+				(unsigned int)pxBinding->ucUnitId, (int)xResult);
+		}
+		return;
+	}
+	if (xResult == MODBUS_PORT_RESULT_PREEMPTED) {
+		return;
+	}
+	ucMiss = pxContext->aucPollMisses[xDeviceId];
+	if (ucMiss < 255U) {
+		ucMiss++;
+	}
+	pxContext->aucPollMisses[xDeviceId] = ucMiss;
+	/* Report only the first miss and the threshold miss. Repeated failures
+	 * after the state has already been confirmed offline are silent. */
+	if ((ucMiss == 1U) || (ucMiss == ucLimit)) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			prvGetDeviceLogSource((uint8_t)xDeviceId),
+			COFFEE3_LOG_ORDER_SYSTEM,
+			"Health poll failed: id=%u miss=%u/%u reason=%s result=%d",
+			(unsigned int)pxBinding->ucUnitId,
+			(unsigned int)ucMiss, (unsigned int)ucLimit,
+			prvModbusResultName(xResult), (int)xResult);
+	}
+	if (ucMiss == ucLimit) {
+		if (ucWasOnline != 0U) {
+			vCoffee3DeviceSetOnline(xDeviceId, 0U);
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				prvGetDeviceLogSource((uint8_t)xDeviceId),
+				COFFEE3_LOG_ORDER_SYSTEM,
+				"Device offline: id=%u reason=two missed polls count=%u result=%d",
+				(unsigned int)pxBinding->ucUnitId,
+				(unsigned int)ucLimit, (int)xResult);
+		} else {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				prvGetDeviceLogSource((uint8_t)xDeviceId),
+				COFFEE3_LOG_ORDER_SYSTEM,
+				"Device unavailable: id=%u reason=no health response count=%u result=%d",
+				(unsigned int)pxBinding->ucUnitId,
+				(unsigned int)ucLimit, (int)xResult);
+		}
+	}
+}
+
+/*-----------------------------------------------------------*/
 void vCoffee3RtuBusTask(void *pvArgument)
 {
 	static const char * const apcTaskRunning[COFFEE3_RTU_BUS_COUNT] = {
@@ -209,7 +482,6 @@ void vCoffee3RtuBusTask(void *pvArgument)
 	uint8_t ucAttempt;
 	uint8_t ucIndex;
 	uint8_t ucModbusPortIndex;
-	uint8_t ucWasOnline;
 
 	pxConfig = (const Coffee3RtuBusConfig_t *)pvArgument;
 	if (pxConfig == NULL) {
@@ -256,6 +528,9 @@ void vCoffee3RtuBusTask(void *pvArgument)
 		}
 		if (xResult == MODBUS_PORT_RESULT_OK) {
 			pxContext->ucCreated = 1U;
+			prvInitializePollSchedule(pxContext, pxConfig->ucBusId);
+			vModbusPortSetPreemptCheck(pxContext->pxPort,
+				prvPollPreempted, pxContext);
 			pxStatus->ulCurrentBaudRate =
 				pxConfig->ulDefaultBaudRate;
 			pxStatus->ucReady = 1U;
@@ -277,6 +552,7 @@ void vCoffee3RtuBusTask(void *pvArgument)
 	for (;;) {
 		if (xQueueReceive(pxContext->xQueue, &xCommand,
 			pdMS_TO_TICKS(COFFEE3_RTU_IDLE_MS)) != pdPASS) {
+			(void)prvTryBackgroundPoll(pxContext, pxConfig, pxStatus);
 			continue;
 		}
 		pxBinding = pxCoffee3DeviceGetBinding(
@@ -292,8 +568,6 @@ void vCoffee3RtuBusTask(void *pvArgument)
 			continue;
 		}
 		vCoffee3DeviceCommandStarted(&xCommand);
-		ucWasOnline =
-			g_axCoffee3DeviceStatus[xCommand.ucDeviceId].ucOnline;
 		pxStatus->ucActiveDevice = xCommand.ucDeviceId;
 		/* A missed response must not cause a second drink or clean cycle. */
 		if ((xCommand.ucDeviceId == COFFEE3_DEVICE_COFFEE_MACHINE) &&
@@ -340,32 +614,24 @@ void vCoffee3RtuBusTask(void *pvArgument)
 		pxStatus->ulCommandCount++;
 		pxStatus->ucActiveDevice = 0U;
 		if ((xResult != MODBUS_PORT_RESULT_OK) &&
-			(xResult != MODBUS_PORT_RESULT_CANCELED)) {
+			(xResult != MODBUS_PORT_RESULT_CANCELED) &&
+			(xCommand.ucSource !=
+				(uint8_t)COFFEE3_COMMAND_SOURCE_MAINTENANCE)) {
 			pxStatus->ulErrorCount++;
 			prvLogCommandFailure(pxConfig, &xCommand, xResult);
 		}
 		vCoffee3DeviceCommandCompleted(&xCommand, (int32_t)xResult,
 			(xResult == MODBUS_PORT_RESULT_TIMEOUT) ? 1U : 0U);
+		/* A successful RTU refresh proves this device is ready for work.
+		 * Online alone is not enough for Workflow's readiness mask. */
 		if ((xResult == MODBUS_PORT_RESULT_OK) &&
-			(ucWasOnline == 0U)) {
-				(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
-					prvGetDeviceLogSource(xCommand.ucDeviceId),
-					(uint16_t)xCommand.ulOrderId,
-					"RTU_DEVICE_ONLINE", 0, "device",
-				(int32_t)xCommand.ucDeviceId);
+			(xCommand.usAction == (uint16_t)COFFEE3_ACTION_REFRESH)) {
+			vCoffee3DeviceSetReady(
+				(Coffee3DeviceId_e)xCommand.ucDeviceId, 1U);
 		}
-		if (ucModbusPortResultIsLinkFailure(xResult) != 0U) {
-			vCoffee3DeviceSetOnline(
-				(Coffee3DeviceId_e)xCommand.ucDeviceId, 0U);
-			if (ucWasOnline != 0U) {
-				(void)xCoffee3LogWriteFieldOrder(
-					COFFEE3_LOG_LEVEL_WARNING,
-					prvGetDeviceLogSource(xCommand.ucDeviceId),
-					(uint16_t)xCommand.ulOrderId,
-					"RTU_DEVICE_OFFLINE", (int32_t)xResult,
-					"device", (int32_t)xCommand.ucDeviceId);
-			}
-		}
+		/* Online/offline is owned exclusively by the autonomous health poll.
+		 * A foreground action failure is reported as an action failure, but it
+		 * cannot by itself declare a device offline. */
 	}
 }
 
@@ -491,12 +757,12 @@ static ModbusPortResult_e prvExecute(Coffee3RtuBusContext_t *pxContext,
 
 	case COFFEE3_DEVICE_ICE_MACHINE:
 		if (pxCommand->usAction == COFFEE3_ACTION_REFRESH) {
-			xResult = xIceMachineRefresh(pxContext->pxPort, pxBinding->ucUnitId,
+			/* The ice controller uses a non-standard FC03 payload: the
+			 * response echoes the start register (00 01) instead of a byte
+			 * count. The driver validates that echo and the raw PDU CRC;
+			 * a reported machine fault is not a communication failure. */
+			return xIceMachineRefresh(pxContext->pxPort, pxBinding->ucUnitId,
 				pxCommand->ulTimeoutMs, &g_xCoffee3IceImage);
-			if ((xResult == MODBUS_PORT_RESULT_OK) &&
-				(ucIceMachineGetFaultMask(&g_xCoffee3IceImage) != 0U))
-				return MODBUS_PORT_RESULT_PROTOCOL;
-			return xResult;
 		}
 		if (pxCommand->usAction == COFFEE3_ACTION_ICE_SET_VALVE)
 			return xIceMachineSetValve(pxContext->pxPort, pxBinding->ucUnitId,
@@ -505,7 +771,7 @@ static ModbusPortResult_e prvExecute(Coffee3RtuBusContext_t *pxContext,
 
 	case COFFEE3_DEVICE_SCALE:
 		switch ((Coffee3Action_e)pxCommand->usAction) {
-		case COFFEE3_ACTION_REFRESH: return xScaleBsqDgV2Refresh(pxContext->pxPort, pxBinding->ucUnitId, pxCommand->ulTimeoutMs, &g_xCoffee3ScaleImage);
+		case COFFEE3_ACTION_REFRESH: return xScaleBsqDgV2RefreshGram(pxContext->pxPort, pxBinding->ucUnitId, pxCommand->ulTimeoutMs, &g_xCoffee3ScaleImage);
 		case COFFEE3_ACTION_SCALE_TARE: return xScaleBsqDgV2Tare(pxContext->pxPort, pxBinding->ucUnitId, pxCommand->ulTimeoutMs);
 		case COFFEE3_ACTION_SCALE_CLEAR_TARE: return xScaleBsqDgV2ClearTare(pxContext->pxPort, pxBinding->ucUnitId, pxCommand->ulTimeoutMs);
 		case COFFEE3_ACTION_SCALE_ZERO: return xScaleBsqDgV2Zero(pxContext->pxPort, pxBinding->ucUnitId, pxCommand->ulTimeoutMs);
@@ -635,14 +901,6 @@ static Coffee3LogSource_e prvGetDeviceLogSource(uint8_t ucDeviceId)
 }
 
 /*-----------------------------------------------------------*/
-static const char *prvGetDeviceName(uint8_t ucDeviceId)
-{
-	const Coffee3DeviceBinding_t *pxBinding;
-	pxBinding = pxCoffee3DeviceGetBinding((Coffee3DeviceId_e)ucDeviceId);
-	return (pxBinding != NULL) ? pxBinding->pcName : "Unknown";
-}
-
-/*-----------------------------------------------------------*/
 static const char *prvGetDeviceProtocolEvent(uint8_t ucDeviceId)
 {
 	switch ((Coffee3DeviceId_e)ucDeviceId) {
@@ -755,7 +1013,32 @@ static const char *prvModbusResultName(ModbusPortResult_e xResult)
 	case MODBUS_PORT_RESULT_PROTOCOL: return "PROTOCOL";
 	case MODBUS_PORT_RESULT_BUSY: return "BUSY";
 	case MODBUS_PORT_RESULT_CANCELED: return "CANCELED";
+	case MODBUS_PORT_RESULT_PREEMPTED: return "PREEMPTED";
 	default: return "OTHER";
+	}
+}
+
+/*-----------------------------------------------------------*/
+static const char *prvActionName(uint16_t usAction)
+{
+	switch ((Coffee3Action_e)usAction) {
+	case COFFEE3_ACTION_REFRESH: return "STATUS_REFRESH";
+	case COFFEE3_ACTION_COFFEE_MAKE: return "COFFEE_MAKE";
+	case COFFEE3_ACTION_COFFEE_CLEAN: return "COFFEE_CLEAN";
+	case COFFEE3_ACTION_CUP_DROP_1: return "CUP_DROP_1";
+	case COFFEE3_ACTION_CUP_DROP_2: return "CUP_DROP_2";
+	case COFFEE3_ACTION_LID_DROP_1: return "LID_DROP_1";
+	case COFFEE3_ACTION_LID_DROP_2: return "LID_DROP_2";
+	case COFFEE3_ACTION_SYRUP_DISPENSE: return "SYRUP_DISPENSE";
+	case COFFEE3_ACTION_SYRUP_CLEAN: return "SYRUP_CLEAN";
+	case COFFEE3_ACTION_SYRUP_SET_REMAINING: return "SYRUP_SET_REMAINING";
+	case COFFEE3_ACTION_ICE_SET_VALVE: return "ICE_VALVE";
+	case COFFEE3_ACTION_SCALE_TARE: return "SCALE_TARE";
+	case COFFEE3_ACTION_SCALE_CLEAR_TARE: return "SCALE_CLEAR_TARE";
+	case COFFEE3_ACTION_SCALE_ZERO: return "SCALE_ZERO";
+	case COFFEE3_ACTION_IO_WRITE: return "IO_WRITE";
+	case COFFEE3_ACTION_IO_WRITE_MASK: return "IO_WRITE_MASK";
+	default: return "DEVICE_ACTION";
 	}
 }
 
@@ -776,10 +1059,10 @@ static void prvLogCommandFailure(const Coffee3RtuBusConfig_t *pxConfig,
 	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 		prvGetDeviceLogSource(pxCommand->ucDeviceId),
 		(uint16_t)pxCommand->ulOrderId,
-		"%s_COMMAND_FAILED RESULT=%d RESULT_NAME=%s BUS=%u UNIT=%u DEVICE_ID=%u ACTION=%u SOURCE=%u STEP=%u",
-		prvGetDeviceName(pxCommand->ucDeviceId), (int)xResult,
-		prvModbusResultName(xResult), (unsigned int)pxConfig->ucBusId,
+		"Action failed: action=%s reason=%s id=%u result=%d code=%u step=%u",
+		prvActionName(pxCommand->usAction), prvModbusResultName(xResult),
 		(pxBinding != NULL) ? (unsigned int)pxBinding->ucUnitId : 0U,
+		(int)xResult,
 		(unsigned int)pxCommand->ucDeviceId,
 		(unsigned int)pxCommand->usAction,
 		(unsigned int)pxCommand->ucSource,

@@ -43,7 +43,8 @@ typedef enum {
 	MODBUS_PORT_RESULT_PROTOCOL = -6, /*!< Response validation failed. */
 	MODBUS_PORT_RESULT_EXCEPTION = -7, /*!< Peer returned a valid exception. */
 	MODBUS_PORT_RESULT_NOT_SUPPORTED = -8, /*!< Requested ability is unavailable. */
-	MODBUS_PORT_RESULT_CANCELED = -9 /*!< Owning workflow canceled the transaction. */
+	MODBUS_PORT_RESULT_CANCELED = -9, /*!< Owning workflow canceled the transaction. */
+	MODBUS_PORT_RESULT_PREEMPTED = -10 /*!< Background frame was intentionally abandoned. */
 } ModbusPortResult_e;
 
 /** @brief Store a bounded copy and total length of one Modbus frame. */
@@ -76,20 +77,30 @@ typedef struct {
   * @warning One owner may execute a transaction on this object at a time.
   */
 typedef struct {
+  /* core module  */
 	nmbs_t xNmbs; /*!< Embedded upstream protocol instance. */
 	nmbs_bitfield aucBitfield; /*!< Scratch storage for coil operations. */
 	TransportChannel_t *pxChannel; /*!< Bound caller-owned byte channel. */
+
+  /* Diagnostic Information  */
 	ModbusPortTrace_t *pxTrace; /*!< Optional caller-owned frame trace. */
 	ModbusPortFault_t xLastFault; /*!< Latest detailed transaction fault. */
+
+  /* Transaction Timing and Runtime Configuration */
 	TickType_t xOperationStart; /*!< Tick at transaction start. */
 	TickType_t xOperationBudget; /*!< Total transaction budget in ticks. */
 	uint32_t ulByteTimeoutMs; /*!< Inter-stage timeout in milliseconds. */
 	uint32_t ulTraceSequence; /*!< Monotonic trace transaction sequence. */
 	ModbusPortTransport_e xTransport; /*!< RTU or TCP framing selection. */
 	ModbusPortRole_e xRole; /*!< Client or server role. */
+
+  /* RUN State */
 	TransportResult_e xLastTransportResult; /*!< Latest callback IO result. */
 	uint8_t ucOperationActive; /*!< Nonzero while a deadline is active. */
 	uint8_t ucInitialized; /*!< Nonzero after nanoMODBUS creation. */
+	uint8_t ucPreempted; /*!< Nonzero when the owner abandoned a background frame. */
+	TransportPreemptCheck_t pxPreemptCheck; /*!< Optional owner preemption callback. */
+	void *pvPreemptContext; /*!< Callback context owned by the caller. */
 } ModbusPort_t;
 
 /**
@@ -103,6 +114,10 @@ typedef struct {
 ModbusPortResult_e xModbusPortClientInit(ModbusPort_t *pxPort,
 	TransportChannel_t *pxChannel, ModbusPortTransport_e xTransport,
 	uint32_t ulByteTimeoutMs);
+
+/** @brief Attach an owner callback used to abandon only background reads. */
+void vModbusPortSetPreemptCheck(ModbusPort_t *pxPort,
+	TransportPreemptCheck_t pxCheck, void *pvContext);
 
 #if (NANOMODBUS_CFG_SERVER_ENABLED != 0)
 /**

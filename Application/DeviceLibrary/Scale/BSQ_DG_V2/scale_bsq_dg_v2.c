@@ -15,9 +15,9 @@ const DeviceDriverDescriptor_t g_xScaleBsqDgV2Driver = {
 	DEVICE_PROTOCOL_MODBUS_RTU
 };
 
-ModbusPortResult_e xScaleBsqDgV2Refresh(ModbusPort_t *pxPort,
+static ModbusPortResult_e prvRefresh(ModbusPort_t *pxPort,
 	uint8_t ucUnitId, uint32_t ulTimeoutMs,
-	ScaleBsqDgV2Image_t *pxImage)
+	ScaleBsqDgV2Image_t *pxImage, uint8_t ucForceGram)
 {
 	ModbusPortResult_e xResult;
 	uint16_t ausValues[SCALE_BSQ_DG_V2_REGISTER_COUNT];
@@ -48,12 +48,29 @@ ModbusPortResult_e xScaleBsqDgV2Refresh(ModbusPort_t *pxPort,
 		lScale *= 10;
 	}
 	lRawValue = (int32_t)pxImage->sRawValue;
-	if (pxImage->usUnit == SCALE_BSQ_DG_V2_UNIT_KG) {
+	if ((ucForceGram == 0U) &&
+		(pxImage->usUnit == SCALE_BSQ_DG_V2_UNIT_KG)) {
+		pxImage->lWeightGram = (lRawValue * 1000) / lScale;
 		pxImage->lWeightTenthGram = (lRawValue * 10000) / lScale;
 	} else {
+		pxImage->lWeightGram = lRawValue / lScale;
 		pxImage->lWeightTenthGram = (lRawValue * 10) / lScale;
 	}
 	return MODBUS_PORT_RESULT_OK;
+}
+
+ModbusPortResult_e xScaleBsqDgV2Refresh(ModbusPort_t *pxPort,
+	uint8_t ucUnitId, uint32_t ulTimeoutMs,
+	ScaleBsqDgV2Image_t *pxImage)
+{
+	return prvRefresh(pxPort, ucUnitId, ulTimeoutMs, pxImage, 0U);
+}
+
+ModbusPortResult_e xScaleBsqDgV2RefreshGram(ModbusPort_t *pxPort,
+	uint8_t ucUnitId, uint32_t ulTimeoutMs,
+	ScaleBsqDgV2Image_t *pxImage)
+{
+	return prvRefresh(pxPort, ucUnitId, ulTimeoutMs, pxImage, 1U);
 }
 
 static ModbusPortResult_e prvWriteCommand(ModbusPort_t *pxPort,

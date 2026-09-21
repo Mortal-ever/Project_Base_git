@@ -1,13 +1,3 @@
-好，这一版继续完全沿用我们刚刚确定的 **“主干 → 分支 → 叶子 → 函数速查”** 学习方式。
-
-这次不要把 `ModbusPort` 理解成“又包了一层 nanoMODBUS”。真正理解以后会发现，它恰恰是这套工程里最值得学习的一个架构层，因为：
-
-> **nanoMODBUS 是通用第三方协议库，Transport 是通用字节通道，而 ModbusPort 是把两者变成“本项目可稳定使用的 Modbus 服务”的工程边界。**
-
-源码文件本身也直接把它定义为“Bind nanoMODBUS to the project Transport abstraction”。
-
-------
-
 # ModbusPort 架构知识图谱
 
 > 基于当前工程：
@@ -17,6 +7,8 @@
 > `modbus_port_config.h`
 >
 > 并结合已经分析过的 `nanoMODBUS` 与当前 `Transport` 接口理解其上下边界。
+>
+> 源码文件本身也直接把它定义为“Bind nanoMODBUS to the project Transport abstraction”
 
 ------
 
@@ -165,17 +157,13 @@ flowchart LR
 上一章已经知道：
 
 ```text
-nanoMODBUS
-=
-Modbus协议专家
+nanoMODBUS = Modbus协议专家
 ```
 
 而下一章我们会看到：
 
 ```text
-Transport
-=
-字节传输专家
+Transport = 字节传输专家
 ```
 
 理论上可以：
@@ -243,12 +231,12 @@ Diagnostic / Error Boundary
 
 ------
 
-## 4.1 Adapter
+## 4.1 Adapter 适配器
 
 把：
 
 ```text
-nanoMODBUS read/write contract
+nanoMODBUS read/write contract 契约
 ```
 
 转换成：
@@ -259,7 +247,7 @@ Transport API
 
 ------
 
-## 4.2 Facade
+## 4.2 Facade 门面 / **接口**
 
 上层不需要直接学习：
 
@@ -280,7 +268,7 @@ xModbusPortWriteRegister(...)
 
 ------
 
-## 4.3 Transaction Controller
+## 4.3 Transaction Controller 事务控制器 
 
 它给每笔操作统一套：
 
@@ -294,7 +282,7 @@ prvFinish
 
 ------
 
-## 4.4 Diagnostic Boundary
+## 4.4 Diagnostic Boundary 诊断边界
 
 它把：
 
@@ -372,30 +360,56 @@ ModbusPort_t
 整体结构：
 
 ```mermaid
-flowchart TB
-
+flowchart LR
     MP["ModbusPort_t"]
-
-    MP --> NM["xNmbs<br/>协议实例"]
-    MP --> SCRATCH["aucBitfield<br/>临时位图"]
-    MP --> CHANNEL["pxChannel<br/>Transport通道"]
-    MP --> TRACE["pxTrace<br/>可选诊断"]
-    MP --> FAULT["xLastFault<br/>最近故障"]
-
-    MP --> DEADLINE["事务时间"]
-    DEADLINE --> START[xOperationStart]
-    DEADLINE --> BUDGET[xOperationBudget]
-
-    MP --> CFG["运行配置"]
-    CFG --> BYTE[ulByteTimeoutMs]
-    CFG --> TYPE[xTransport]
-    CFG --> ROLE[xRole]
-
-    MP --> STATE["运行状态"]
-    STATE --> LT[xLastTransportResult]
-    STATE --> ACTIVE[ucOperationActive]
-    STATE --> INIT[ucInitialized]
-    STATE --> SEQ[ulTraceSequence]
+    
+    subgraph G1["核心组件"]
+        direction TB
+        NM["xNmbs<br/>协议实例"]
+        SCRATCH["aucBitfield<br/>临时位图"]
+        CHANNEL["pxChannel<br/>Transport通道"]
+    end
+    
+    subgraph G2["诊断信息"]
+        direction TB
+        TRACE["pxTrace<br/>可选诊断"]
+        FAULT["xLastFault<br/>最近故障"]
+    end
+    
+    subgraph G3["时间与配置"]
+        direction TB
+        DEADLINE["事务时间"]
+        START[xOperationStart]
+        BUDGET[xOperationBudget]
+        CFG["运行配置"]
+        BYTE[ulByteTimeoutMs]
+        TYPE[xTransport]
+        ROLE[xRole]
+    end
+    
+    subgraph G4["运行状态"]
+        direction TB
+        STATE["运行状态"]
+        LT[xLastTransportResult]
+        ACTIVE[ucOperationActive]
+        INIT[ucInitialized]
+        SEQ[ulTraceSequence]
+    end
+    
+    MP --> G1
+    MP --> G2
+    MP --> G3
+    MP --> G4
+    
+    DEADLINE --> START
+    DEADLINE --> BUDGET
+    CFG --> BYTE
+    CFG --> TYPE
+    CFG --> ROLE
+    STATE --> LT
+    STATE --> ACTIVE
+    STATE --> INIT
+    STATE --> SEQ
 ```
 
 ------
@@ -462,27 +476,42 @@ TransportChannel_t *pxChannel;
 所以关系是：
 
 ```text
-ModbusPort
-   │
-   │ 引用
-   ▼
-TransportChannel
+ModbusPort_t port
+┌──────────────────────────────┐
+│                              │
+│ xNmbs                        │
+│ ┌──────────────────────────┐ │
+│ │ 真正的 nmbs_t 数据       │ │
+│ │ buf                      │ │
+│ │ timeout                  │ │
+│ │ callbacks                │ │
+│ │ msg                      │ │
+│ └──────────────────────────┘ │
+│                              │
+│ pxChannel = 0x20001000 ──────┼─────────────┐
+│                              │             │
+└──────────────────────────────┘             │
+                                             ▼
+                              另一个地方的内存
+                         ┌─────────────────────────┐
+                         │ TransportChannel_t      │
+                         | pxOps              	   │
+                         │ pvContext           	   │
+                         │ state               	   │
+                         │ ...                     │
+                         └─────────────────────────┘
 ```
 
 而不是拥有 Transport Channel 的存储。
 
-头文件也明确要求传入的 `TransportChannel_t` 生命周期必须覆盖 `ModbusPort_t`。
+⚠️头文件也明确要求传入的 `TransportChannel_t` 生命周期必须覆盖 `ModbusPort_t`以防止悬空指针
 
 所以这里出现一个非常重要的 C 设计概念：
 
 ```text
-xNmbs
-=
-Owned / Embedded
+xNmbs = 对象本体就在这里 (增加一块完整的nmbs_t内存)
 
-pxChannel
-=
-Referenced / Borrowed
+pxChannel = 这里只保存“另一个对象在哪里” (只增加一个指针大小)
 ```
 
 ------
@@ -508,11 +537,14 @@ ModbusPort_t
    │
    ├── owns xNmbs
    ├── owns aucBitfield
-   ├── owns xLastFault
+   ├── owns xLastFault 
+   ├── 生命周期跟随 ModbusPort
    │
-   ├── references TransportChannel_t
+   ├── references TransportChannel_t 指向外部 TransportChannel  
+   ├── 生命周期由外部保证
    │
-   └── references ModbusPortTrace_t
+   ├── references ModbusPortTrace_t 指向外部 Trace  
+   └── 生命周期由外部保证
 ```
 
 这张图以后分析任何 C 库都非常值得画。

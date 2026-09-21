@@ -27,6 +27,9 @@
 #define COFFEE3_WORKFLOW_ERROR_DEVICE         (-1003)
 #define COFFEE3_WORKFLOW_ERROR_CANCELED       (-1004)
 #define COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT     (-1006)
+#define COFFEE3_WORKFLOW_ERROR_ICE_RANGE      (-1011)
+#define COFFEE3_WORKFLOW_ERROR_ICE_NO_CUP     (-1012)
+#define COFFEE3_WORKFLOW_ERROR_ICE_BASELINE   (-1013)
 #define COFFEE3_WORKFLOW_ERROR_SAFE_STOP      (-1007)
 #define COFFEE3_WORKFLOW_ERROR_UNSUPPORTED    (-1008)
 #define COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED  (-1009)
@@ -133,6 +136,9 @@ static Coffee3Command_t s_xInitHome;
 // static TickType_t s_xInitRetryTick;
 static uint16_t s_usLastReadyMask;
 static uint8_t s_ucLastBaseReady;
+static int32_t s_lIceScaleEmptyBaselineGram;
+static TickType_t s_xIceScaleBaselineRetryTick;
+static uint8_t s_ucIceScaleBaselineValid;
 
 COFFEE3_CCM_DATA
 Coffee3WorkflowStatus_t g_xCoffee3WorkflowStatus;
@@ -159,25 +165,43 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
   */
 static int32_t prvRunOrder(const Coffee3Order_t *pxOrder);
 /**
-  * @brief  在称重反馈下出冰，并确保任何路径都关闭阀门。
-  * @param[in] usTargetDecigram 目标冰量，单位为 0.1 g。
-  * @retval 0 达到允许误差范围内的目标重量。
-  * @retval 负数 称重、通信、取消、超重或补偿失败。
+  * @brief  Dispense ice by subtracting the cup-on-scale baseline.
+  * @param[in] usTargetGram Target ice weight in grams.
+  * @param[in] lCupBaselineGram Stable total before opening the valve.
+  * @retval 0 The final ice weight is within the accepted safety range.
+  * @retval Negative A scale, communication, cancel, or range check failed.
   */
-static int32_t prvDispenseIce(uint16_t usTargetDecigram);
+static int32_t prvDispenseIce(uint16_t usTargetGram,
+	int32_t lCupBaselineGram);
 /**
-  * @brief  根据一阶模型计算并限制一次制冰阀脉冲时间。
-  * @param[in] usTargetDecigram 目标冰量，单位为 0.1 g。
-  * @retval 阀门脉冲时间，单位为毫秒，已限制在安全上下限内。
+  * @brief  Confirm a cup by subtracting a known empty-scale baseline.
+  * @param[in] lEmptyBaselineGram Empty-scale total in grams.
+  * @param[in] usStepBase First step identifier used by the stable read.
+  * @param[out] plCupBaselineGram Stable cup-on-scale total in grams.
+  * @retval 0 A cup heavier than the Coffee1 detection threshold is present.
+  * @retval COFFEE3_WORKFLOW_ERROR_ICE_NO_CUP Three checks found no cup.
+  * @retval Negative A scale read or cup-weight validation failed.
   */
-static uint32_t prvCalculateIcePulseMs(uint16_t usTargetDecigram);
+static int32_t prvConfirmIceCup(int32_t lEmptyBaselineGram,
+	uint16_t usStepBase, int32_t *plCupBaselineGram);
 /**
-  * @brief  读取三次称重采样并返回以 0.1 g 表示的中值。
-  * @param[out] plWeightDecigram 输出中值重量，单位为 0.1 g。
-  * @retval 0 三次采样有效且已得到中值。
-  * @retval 负数 称重设备通信、单位或稳定性错误。
+  * @brief  Calculate an ice pulse using the Coffee1 initial-time limits.
+  * @param[in] usTargetGram Target or remaining ice in grams.
+  * @param[in] usSlopeMsPerGram Calibration slope in ms/g.
+  * @param[in] ucAttempt Zero for the initial pulse, otherwise a correction.
+  * @retval Valve pulse in milliseconds, within the configured limits.
   */
-static int32_t prvReadStableScale(int32_t *plWeightDecigram);
+static uint32_t prvCalculateIcePulseMs(uint16_t usTargetGram,
+	uint16_t usSlopeMsPerGram, uint8_t ucAttempt);
+/**
+  * @brief  Read three scale samples and return the median in grams.
+  * @param[in] usStepBase First step identifier used by the samples.
+  * @param[out] plWeightGram Median stable total in grams.
+  * @retval 0 Three valid samples were collected.
+  * @retval Negative Scale communication or conversion failed.
+  */
+static int32_t prvReadStableScale(uint16_t usStepBase,
+	int32_t *plWeightGram);
 /**
   * @brief  发生失败后向相关执行机构提交尽力取消命令。
   * @note   函数本身不等待每个取消命令完成，调用者必须执行取消屏障。
@@ -205,12 +229,14 @@ static int32_t prvWaitBusinessCondition(uint16_t usStep,
 static int32_t prvRefreshDeviceQuiet(uint16_t usStep,
 	Coffee3DeviceId_e xDeviceId);
 static uint8_t prvBusinessConditionActive(uint8_t ucCondition);
+static const char *prvWorkflowDeviceName(Coffee3DeviceId_e xDeviceId);
+static const char *prvWorkflowActionName(Coffee3Action_e xAction);
 static int32_t prvWaitDeviceReportedComplete(uint16_t usStep,
 	Coffee3DeviceId_e xDeviceId, uint8_t ucStatusIndex,
 	uint16_t usSuccessValue, uint16_t usFailedValue);
 /**
-  * @brief  周期刷新本地 GPIO 和外部 IO 模块镜像。
-  * @note   函数只提交非阻塞刷新命令，不拥有 RTU 总线。
+  * @brief  周期刷新本地 GPIO 镜像并服务取杯边界。
+  * @note   外部 RTU IO 镜像由 Bus5 自主轮询，本函数不再投递刷新帧。
   */
 static void prvServiceIoRefresh(void);
 static uint16_t s_usLastInitializationFailure = 0xFFFFU;
@@ -237,6 +263,9 @@ static uint16_t prvReadyDevices(void);
 static uint8_t prvOrderDevicesReady(const Coffee3Order_t *pxOrder);
 static uint8_t prvMaintenanceReady(Coffee3MaintenanceType_e xType);
 static uint8_t prvMaintenanceIdle(void);
+static void prvServiceIceScaleBaseline(uint16_t usReadyMask);
+static int32_t prvEstablishIceScaleBaseline(void);
+static uint8_t prvIceTerminalFailure(int32_t lResult);
 
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee3WorkflowAcquireManual(void)
@@ -315,9 +344,7 @@ BaseType_t xCoffee3WorkflowAcquireOta(void)
 		}
 	}
 	if ((xIo.aucModbusValid[1] == 0U) ||
-		(g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_OUTPUT].ucOnline == 0U) ||
-		((xTaskGetTickCount() - xIo.aulModbusUpdateTick[1]) >=
-		 pdMS_TO_TICKS(COFFEE3_IO_STALE_MS))) {
+		(g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_OUTPUT].ucOnline == 0U)) {
 		return pdFAIL;
 	}
 	for (ucIndex = 0U; ucIndex < COFFEE3_MODBUS_IO_COUNT; ucIndex++) {
@@ -418,8 +445,8 @@ static uint16_t prvReadyDevices(void)
 			usMask |= (uint16_t)(1U << ucId);
 		}
 	}
-	/* IO readiness is a live, fresh image; RTU owners do not publish the
-	 * robot owner's control-ready flag. */
+	/* IO readiness is published by the RTU owner's health confirmation;
+	 * RTU owners do not publish the robot owner's control-ready flag. */
 	if ((g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_INPUT].ucOnline == 0U) ||
 		(prvIoValid(&xIo) == 0U)) {
 		usMask &= (uint16_t)~(1U << COFFEE3_DEVICE_IO_INPUT);
@@ -427,9 +454,7 @@ static uint16_t prvReadyDevices(void)
 		usMask |= (uint16_t)(1U << COFFEE3_DEVICE_IO_INPUT);
 	}
 	if ((g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_OUTPUT].ucOnline == 0U) ||
-		(xIo.aucModbusValid[1] == 0U) ||
-		((xTaskGetTickCount() - xIo.aulModbusUpdateTick[1]) >=
-		 pdMS_TO_TICKS(COFFEE3_IO_STALE_MS))) {
+		(xIo.aucModbusValid[1] == 0U)) {
 		usMask &= (uint16_t)~(1U << COFFEE3_DEVICE_IO_OUTPUT);
 	} else {
 		usMask |= (uint16_t)(1U << COFFEE3_DEVICE_IO_OUTPUT);
@@ -447,6 +472,105 @@ static uint8_t prvMaintenanceIdle(void)
 		(uxQueueMessagesWaiting(s_xOrderQueue) == 0U) &&
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_CANCELING)) ? 1U : 0U;
+}
+
+/*-----------------------------------------------------------*/
+static int32_t prvEstablishIceScaleBaseline(void)
+{
+	int32_t lResult;
+	int32_t lWeightGram;
+
+	lWeightGram = 0;
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+		"Scale baseline start: reason=startup empty zero");
+	lResult = prvRunStep(0xFC10U, COFFEE3_DEVICE_SCALE,
+		COFFEE3_ACTION_SCALE_CLEAR_TARE, 0U, 0U, 3000U);
+	if (lResult == 0) {
+		lResult = prvRunStep(0xFC11U, COFFEE3_DEVICE_SCALE,
+			COFFEE3_ACTION_SCALE_ZERO, 0U, 0U, 3000U);
+	}
+	if (lResult != 0) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+			"Scale baseline failed: reason=zero command result=%ld",
+			(long)lResult);
+		return lResult;
+	}
+	vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_BASELINE_SETTLE_MS));
+	lResult = prvReadStableScale(0xFC12U, &lWeightGram);
+	if (lResult != 0) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+			"Scale baseline failed: reason=read result=%ld", (long)lResult);
+		return lResult;
+	}
+	if ((lWeightGram < -COFFEE3_ICE_BASELINE_TOLERANCE_GRAM) ||
+		(lWeightGram > COFFEE3_ICE_BASELINE_TOLERANCE_GRAM)) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+			"Scale baseline failed: reason=zero unstable weight=%ld g",
+			(long)lWeightGram);
+		return COFFEE3_WORKFLOW_ERROR_ICE_BASELINE;
+	}
+	taskENTER_CRITICAL();
+	s_lIceScaleEmptyBaselineGram = lWeightGram;
+	s_ucIceScaleBaselineValid = 1U;
+	taskEXIT_CRITICAL();
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+		"Scale baseline ready: empty=%ld g reason=startup zero",
+		(long)lWeightGram);
+	return 0;
+}
+
+/*-----------------------------------------------------------*/
+static void prvServiceIceScaleBaseline(uint16_t usReadyMask)
+{
+	TickType_t xNow;
+	int32_t lResult;
+	uint16_t usScaleMask;
+
+	usScaleMask = (uint16_t)(1U << COFFEE3_DEVICE_SCALE);
+	if ((usReadyMask & usScaleMask) == 0U) {
+		if (s_ucIceScaleBaselineValid != 0U) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+				"Scale baseline lost: reason=scale offline");
+		}
+		taskENTER_CRITICAL();
+		s_ucIceScaleBaselineValid = 0U;
+		taskEXIT_CRITICAL();
+		s_xIceScaleBaselineRetryTick = 0U;
+		return;
+	}
+	if ((s_ucIceScaleBaselineValid != 0U) ||
+		(s_ucResidualState != 2U) || (prvMaintenanceIdle() == 0U)) {
+		return;
+	}
+	if (g_xCoffee3WorkflowStatus.ucRecoveryRequired != 0U) {
+		return;
+	}
+	xNow = xTaskGetTickCount();
+	if ((s_xIceScaleBaselineRetryTick != 0U) &&
+		((int32_t)(xNow - s_xIceScaleBaselineRetryTick) < 0)) {
+		return;
+	}
+	lResult = prvEstablishIceScaleBaseline();
+	if (lResult != 0) {
+		s_xIceScaleBaselineRetryTick = xTaskGetTickCount() +
+			pdMS_TO_TICKS(COFFEE3_ICE_BASELINE_RETRY_MS);
+	} else {
+		s_xIceScaleBaselineRetryTick = 0U;
+	}
+}
+
+/*-----------------------------------------------------------*/
+static uint8_t prvIceTerminalFailure(int32_t lResult)
+{
+	return ((lResult == COFFEE3_WORKFLOW_ERROR_ICE_RANGE) ||
+		(lResult == COFFEE3_WORKFLOW_ERROR_ICE_NO_CUP) ||
+		(lResult == COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT)) ? 1U : 0U;
 }
 
 static uint8_t prvMaintenanceReady(Coffee3MaintenanceType_e xType)
@@ -479,6 +603,9 @@ static uint8_t prvOrderDevicesReady(const Coffee3Order_t *pxOrder)
 	if (pxOrder->ausRegister[COFFEE3_REG_ICE_AMOUNT] != 0U) {
 		usRequired |= (1U << COFFEE3_DEVICE_ICE_MACHINE) |
 			(1U << COFFEE3_DEVICE_SCALE);
+		if (s_ucIceScaleBaselineValid == 0U) {
+			return 0U;
+		}
 	}
 	if ((pxOrder->ausRegister[COFFEE3_REG_FRUIT_MILK_A] != 0U) ||
 		(pxOrder->ausRegister[COFFEE3_REG_FRUIT_MILK_B] != 0U)) {
@@ -506,9 +633,28 @@ static void prvServiceInitialization(void)
 
 	usReady = prvReadyDevices();
 	if (usReady != s_usLastReadyMask) {
+		uint8_t ucId;
+		for (ucId = 1U; ucId < (uint8_t)COFFEE3_DEVICE_COUNT; ucId++) {
+			if (((usReady & (uint16_t)(1U << ucId)) != 0U) &&
+				((s_usLastReadyMask & (uint16_t)(1U << ucId)) == 0U)) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					COFFEE3_LOG_ORDER_SYSTEM,
+					"Device ready: name=%s reason=health poll recv",
+					prvWorkflowDeviceName((Coffee3DeviceId_e)ucId));
+			}
+			if (((usReady & (uint16_t)(1U << ucId)) == 0U) &&
+				((s_usLastReadyMask & (uint16_t)(1U << ucId)) != 0U)) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					COFFEE3_LOG_ORDER_SYSTEM,
+					"Device not ready: name=%s reason=link or data lost",
+					prvWorkflowDeviceName((Coffee3DeviceId_e)ucId));
+			}
+		}
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-			"Device readiness changed: ready=0x%04X lost=0x%04X",
+			"Readiness changed: ready=0x%04X lost=0x%04X",
 			(unsigned int)usReady,
 			(unsigned int)(s_usLastReadyMask & ~usReady));
 		s_usLastReadyMask = usReady;
@@ -526,7 +672,7 @@ static void prvServiceInitialization(void)
 		(void)xCoffee3LogPrintfOrder((lResult == 0) ?
 			COFFEE3_LOG_LEVEL_INFO : COFFEE3_LOG_LEVEL_ERROR,
 			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-			(lResult == 0) ? "Residual check passed; debug is available; HOME is performed once before the next order" :
+			(lResult == 0) ? "Residual check passed; debug ready; HOME runs before next order" :
 			"Residual check failed (%ld); inspect cups and reset",
 			(long)lResult);
 		if (lResult != 0) {
@@ -536,6 +682,7 @@ static void prvServiceInitialization(void)
 			g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
 		}
 	}
+	prvServiceIceScaleBaseline(usReady);
 
 	vCoffee3IoGetSnapshot(&xIo);
 	if ((s_ucResidualState == 2U) && (s_ucDoorInitStarted == 0U)) {
@@ -556,7 +703,7 @@ static void prvServiceInitialization(void)
 		s_ucLastBaseReady = ucBaseReady;
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-			"Production base ready=%u; recipe devices checked per order",
+			"Production ready=%u; recipe devices checked per order",
 			(unsigned int)ucBaseReady);
 	}
 	if (prvMaintenanceIdle() != 0U) {
@@ -572,9 +719,8 @@ static void prvServiceInitialization(void)
 static uint8_t prvIoValid(const Coffee3IoState_t *pxIo)
 {
 	return ((pxIo->aucModbusValid[0] != 0U) &&
-		(g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_INPUT].ucOnline != 0U) &&
-		((TickType_t)(xTaskGetTickCount() - pxIo->aulModbusUpdateTick[0]) <
-		 pdMS_TO_TICKS(COFFEE3_IO_STALE_MS))) ? 1U : 0U;
+		(g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_INPUT].ucOnline != 0U)) ?
+		1U : 0U;
 }
 
 static void prvStartDoor(uint8_t ucDirection)
@@ -676,7 +822,7 @@ static void prvServicePickup(void)
 		s_ucWaterAlarm = 1U;
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_WORKFLOW, g_xCoffee3WorkflowStatus.usCurrentOrderId,
-			"Water X4 lost; finish active order normally, reject next order until recovery ACK");
+			"Water X4 lost; finish order; block next order until recovery");
 	}
 	if (s_ucDoorDirection != 0U) {
 		ucDoorConflict = ((xIo.xInput.aucXPin[0] != 0U) &&
@@ -689,7 +835,7 @@ static void prvServicePickup(void)
 				"Outlet door fault latched; outputs off; waiting for valid target limit" :
 				((xIo.xInput.aucXPin[0] != 0U) &&
 				 (xIo.xInput.aucXPin[1] != 0U)) ?
-				"Outlet door limit conflict: DI1 and DI2 active; outputs off; waiting for valid target limit" :
+				"Door limit conflict: DI1 and DI2 active; outputs off" :
 				(s_ucDoorDirection == 1U) ?
 				"Outlet door CLOSE/UP timeout: DI1 not confirmed; DO1 off; waiting for DI1" :
 				"Outlet door OPEN/DOWN timeout: DI2 not confirmed; DO2 off; waiting for DI2";
@@ -877,6 +1023,9 @@ BaseType_t xCoffee3WorkflowInitialize(void)
 	// s_xInitRetryTick = 0U;
 	s_usLastReadyMask = 0U;
 	s_ucLastBaseReady = 0U;
+	s_lIceScaleEmptyBaselineGram = 0;
+	s_xIceScaleBaselineRetryTick = 0U;
+	s_ucIceScaleBaselineValid = 0U;
 	g_xCoffee3WorkflowStatus.xMachineState =
 		COFFEE3_MACHINE_INITIALIZING;
 	g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
@@ -1028,26 +1177,51 @@ BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage)
 }
 
 /*-----------------------------------------------------------*/
-BaseType_t xCoffee3WorkflowSubmitManualIce(uint16_t usTargetWeight)
+BaseType_t xCoffee3WorkflowSubmitManualIce(uint16_t usTargetGrams)
 {
 	BaseType_t xResult;
+	const char *pcRejectReason;
+	uint16_t usReadyMask;
 
-	if ((usTargetWeight == 0U) || (s_xOrderQueue == NULL) ||
-		(uxQueueMessagesWaiting(s_xOrderQueue) != 0U)) {
-		return pdFAIL;
-	}
 	xResult = pdFAIL;
-	taskENTER_CRITICAL();
-	if ((prvMaintenanceIdle() != 0U) &&
-		((prvReadyDevices() & ((1U << COFFEE3_DEVICE_ICE_MACHINE) |
-		(1U << COFFEE3_DEVICE_SCALE))) == ((1U << COFFEE3_DEVICE_ICE_MACHINE) |
-		(1U << COFFEE3_DEVICE_SCALE)))) {
-		s_usManualIceWeight = usTargetWeight;
-		s_ucManualIcePending = 1U;
-		g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
-		xResult = pdPASS;
+	pcRejectReason = NULL;
+	usReadyMask = 0U;
+	if (usTargetGrams == 0U) {
+		pcRejectReason = "target_zero";
+	} else if (s_xOrderQueue == NULL) {
+		pcRejectReason = "workflow_not_ready";
+	} else if (uxQueueMessagesWaiting(s_xOrderQueue) != 0U) {
+		pcRejectReason = "order_pending";
+	} else {
+		taskENTER_CRITICAL();
+		usReadyMask = prvReadyDevices();
+		if (s_ucResidualState == 1U) {
+			pcRejectReason = "residual_check_running";
+		} else if (prvMaintenanceIdle() == 0U) {
+			pcRejectReason = "workflow_busy";
+		} else if ((usReadyMask &
+			(1U << COFFEE3_DEVICE_ICE_MACHINE)) == 0U) {
+			pcRejectReason = "ice_not_ready";
+		} else if ((usReadyMask &
+			(1U << COFFEE3_DEVICE_SCALE)) == 0U) {
+			pcRejectReason = "scale_not_ready";
+		} else if (s_ucIceScaleBaselineValid == 0U) {
+			pcRejectReason = "scale_baseline_pending";
+		} else {
+			s_usManualIceWeight = usTargetGrams;
+			s_ucManualIcePending = 1U;
+			g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
+			xResult = pdPASS;
+		}
+		taskEXIT_CRITICAL();
 	}
-	taskEXIT_CRITICAL();
+	if (xResult != pdPASS) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_DEBUG,
+			"Manual ice rejected: %s, ready=0x%04X, target=%u g",
+			pcRejectReason, (unsigned int)usReadyMask,
+			(unsigned int)usTargetGrams);
+	}
 	return xResult;
 }
 
@@ -1077,6 +1251,8 @@ void vCoffee3WorkflowTask(void *pvArgument)
 	uint16_t usStoragePickup;
 	uint16_t usManualIceWeight;
 	uint8_t ucManualBarrier;
+	uint8_t ucManualIceDispenseStarted;
+	const char *pcIceFailureLog;
 	Coffee3MaintenanceRequest_t xMaintenance;
 
 	(void)pvArgument;
@@ -1151,7 +1327,11 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			}
 			taskEXIT_CRITICAL();
 			if (usManualIceWeight != 0U) {
+				int32_t lCupBaselineGram;
+
 				s_usActiveDevices = 0U;
+				ucManualIceDispenseStarted = 0U;
+				lCupBaselineGram = 0;
 				taskENTER_CRITICAL();
 				s_ulNextOrderEpoch++;
 				if (s_ulNextOrderEpoch == 0U) {
@@ -1167,10 +1347,17 @@ void vCoffee3WorkflowTask(void *pvArgument)
 					COFFEE3_LOG_LEVEL_INFO,
 					COFFEE3_LOG_SOURCE_WORKFLOW,
 					COFFEE3_LOG_ORDER_DEBUG,
-					"MANUAL_ICE_START", 0, "target_dg",
+					"MANUAL_ICE_START", 0, "target_g",
 					(int32_t)usManualIceWeight);
 				prvPublish(COFFEE3_WORKFLOW_RUNNING, 900U, 0);
-				lResult = prvDispenseIce(usManualIceWeight);
+				lResult = prvConfirmIceCup(
+					s_lIceScaleEmptyBaselineGram, 901U,
+					&lCupBaselineGram);
+				if (lResult == 0) {
+					ucManualIceDispenseStarted = 1U;
+					lResult = prvDispenseIce(usManualIceWeight,
+						lCupBaselineGram);
+				}
 				if (lResult == 0) {
 					taskENTER_CRITICAL();
 					g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
@@ -1181,17 +1368,29 @@ void vCoffee3WorkflowTask(void *pvArgument)
 						COFFEE3_LOG_LEVEL_INFO,
 						COFFEE3_LOG_SOURCE_WORKFLOW,
 						COFFEE3_LOG_ORDER_DEBUG,
-						"MANUAL_ICE_DONE", 0, "target_dg",
+						"MANUAL_ICE_DONE", 0, "target_g",
 						(int32_t)usManualIceWeight);
 				} else {
-					lSafetyResult = prvAbortDevices();
-					g_xCoffee3WorkflowStatus.lSafetyResult = lSafetyResult;
-					if (lSafetyResult == 0) {
+					/* A pre-dispense cup-check failure has no moving actuator to abort.
+					 * Range failures also return after the valve has been closed. */
+					if ((prvIceTerminalFailure(lResult) != 0U) ||
+						(ucManualIceDispenseStarted == 0U)) {
+						s_usActiveDevices = 0U;
+						lSafetyResult = 0;
+						g_xCoffee3WorkflowStatus.lSafetyResult = 0;
 						taskENTER_CRITICAL();
 						g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
 						taskEXIT_CRITICAL();
 					} else {
-						g_xCoffee3WorkflowStatus.ucRecoveryRequired = 1U;
+						lSafetyResult = prvAbortDevices();
+						g_xCoffee3WorkflowStatus.lSafetyResult = lSafetyResult;
+						if (lSafetyResult == 0) {
+							taskENTER_CRITICAL();
+							g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+							taskEXIT_CRITICAL();
+						} else {
+							g_xCoffee3WorkflowStatus.ucRecoveryRequired = 1U;
+						}
 					}
 					prvPublish(COFFEE3_WORKFLOW_FAILED,
 						g_xCoffee3WorkflowStatus.usCurrentStep,
@@ -1311,25 +1510,50 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			taskENTER_CRITICAL();
 			g_xCoffee3WorkflowStatus.ulFailedOrderCount++;
 			taskEXIT_CRITICAL();
-			lSafetyResult = (s_usActiveDevices != 0U) ? prvAbortDevices() : 0;
-			g_xCoffee3WorkflowStatus.lSafetyResult = lSafetyResult;
-			if ((lSafetyResult == 0) &&
-				(g_xCoffee3WorkflowStatus.ucPositionUncertain == 0U)) {
-				if (prvQueuePendingOrder() == 0U) {
-					taskENTER_CRITICAL();
-					g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
-					taskEXIT_CRITICAL();
-				}
-			} else {
+			if (prvIceTerminalFailure(lResult) != 0U) {
+				/* A confirmed weight/cup terminal failure leaves the robot at the
+				 * ice station and does not issue recovery motion. */
+				s_usActiveDevices = 0U;
+				lSafetyResult = 0;
+				g_xCoffee3WorkflowStatus.lSafetyResult = 0;
 				g_xCoffee3WorkflowStatus.ucRecoveryRequired = 1U;
 				g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
 				s_ucPendingOrder = 0U;
+				if (lResult == COFFEE3_WORKFLOW_ERROR_ICE_RANGE) {
+					pcIceFailureLog =
+						"Order failed: reason=ice weight unsafe; cup stays at ice station";
+				} else if (lResult == COFFEE3_WORKFLOW_ERROR_ICE_NO_CUP) {
+					pcIceFailureLog =
+						"Order failed: reason=no cup at ice station; motion skipped";
+				} else {
+					pcIceFailureLog =
+						"Order failed: reason=cup weight invalid; motion skipped";
+				}
 				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
 					COFFEE3_LOG_SOURCE_WORKFLOW,
 					g_xCoffee3WorkflowStatus.usCurrentOrderId,
-					"Recovery locked: stop=%ld position_unknown=%u; inspect/reset",
-					(long)lSafetyResult,
-					(unsigned int)g_xCoffee3WorkflowStatus.ucPositionUncertain);
+					pcIceFailureLog);
+			} else {
+				lSafetyResult = (s_usActiveDevices != 0U) ? prvAbortDevices() : 0;
+				g_xCoffee3WorkflowStatus.lSafetyResult = lSafetyResult;
+				if ((lSafetyResult == 0) &&
+					(g_xCoffee3WorkflowStatus.ucPositionUncertain == 0U)) {
+					if (prvQueuePendingOrder() == 0U) {
+						taskENTER_CRITICAL();
+						g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+						taskEXIT_CRITICAL();
+					}
+				} else {
+					g_xCoffee3WorkflowStatus.ucRecoveryRequired = 1U;
+					g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
+					s_ucPendingOrder = 0U;
+					(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+						COFFEE3_LOG_SOURCE_WORKFLOW,
+						g_xCoffee3WorkflowStatus.usCurrentOrderId,
+						"Recovery locked: stop=%ld position_unknown=%u; inspect/reset",
+						(long)lSafetyResult,
+						(unsigned int)g_xCoffee3WorkflowStatus.ucPositionUncertain);
+				}
 			}
 			prvPublish(COFFEE3_WORKFLOW_FAILED,
 				g_xCoffee3WorkflowStatus.usCurrentStep, lResult);
@@ -1419,11 +1643,11 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 		return COFFEE3_WORKFLOW_ERROR_CANCELED;
 	}
 	if (ucInitializationStep == 0U) {
-		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
-			COFFEE3_LOG_SOURCE_WORKFLOW,
-			usLogOrder,
-			"WORKFLOW_STEP_START",
-			(int32_t)xAction, "step", (int32_t)usStep);
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW, usLogOrder,
+			"Step start: %s %s step=%u",
+			prvWorkflowDeviceName(xDeviceId), prvWorkflowActionName(xAction),
+			(unsigned int)usStep);
 	}
 	if (ucOrderStep != 0U) {
 		g_xCoffee3WorkflowStatus.ucDeviceId = (uint8_t)xDeviceId;
@@ -1524,11 +1748,11 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 				g_xCoffee3WorkflowStatus.ucDeviceDone = 1U;
 			}
 			if (ucInitializationStep == 0U) {
-				(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
-					COFFEE3_LOG_SOURCE_WORKFLOW,
-					usLogOrder,
-					"WORKFLOW_STEP_DONE", 0,
-					"step", (int32_t)usStep);
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW, usLogOrder,
+				"Step done: %s %s step=%u result=0",
+				prvWorkflowDeviceName(xDeviceId), prvWorkflowActionName(xAction),
+				(unsigned int)usStep);
 			}
 			return 0;
 		}
@@ -1605,6 +1829,9 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 	 * ordered device sequence and verify each physical postcondition. */
 	int32_t lResult;
 	int32_t lValidationError;
+	int32_t lIceEmptyBaselineGram;
+	int32_t lIceCupBaselineGram;
+	int32_t lIceEmptyDeltaGram;
 	uint16_t usIceAmount;
 	uint16_t usSyrupAmount;
 	uint16_t usColdOrder;
@@ -1614,6 +1841,10 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 	Coffee3IoState_t xIo;
 	uint8_t ucNeedCoffeeStation;
 	uint8_t ucNeedFlavorStation;
+
+	lIceEmptyBaselineGram = 0;
+	lIceCupBaselineGram = 0;
+	lIceEmptyDeltaGram = 0;
 
 	if (prvOrderValid(pxOrder, &lValidationError) == 0U) {
 		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_ERROR,
@@ -1643,7 +1874,7 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 		(xIo.xInput.aucMB1XPin[6] != 0U)) {
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_WORKFLOW, g_xCoffee3WorkflowStatus.usCurrentOrderId,
-			"Order rejected before motion: check valid IO, water X4, bins X5/X6 and waste X7");
+			"Order rejected before motion: IO, water, bins, or waste not ready");
 		return COFFEE3_WORKFLOW_ERROR_IO;
 	}
 	lResult = (ucOffline != 0U) ? prvCheckOutputEmpty(1U) : prvSelectStorage();
@@ -1723,11 +1954,42 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 				COFFEE3_CONDITION_CUP_1);
 	}
 	if ((lResult == 0) && (usIceAmount != 0U)) {
+		lResult = prvReadStableScale(56U, &lIceEmptyBaselineGram);
+		if (lResult == 0) {
+			lIceEmptyDeltaGram = lIceEmptyBaselineGram -
+				s_lIceScaleEmptyBaselineGram;
+			if (lIceEmptyDeltaGram < 0) {
+				lIceEmptyDeltaGram = -lIceEmptyDeltaGram;
+			}
+			if (lIceEmptyDeltaGram > COFFEE3_ICE_CUP_DETECT_GRAM) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.usCurrentOrderId,
+					"Empty scale failed: current=%ld g startup=%ld g reason=load present",
+					(long)lIceEmptyBaselineGram,
+					(long)s_lIceScaleEmptyBaselineGram);
+				lResult = COFFEE3_WORKFLOW_ERROR_ICE_BASELINE;
+			} else {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.usCurrentOrderId,
+					"Empty scale ready: current=%ld g startup=%ld g",
+					(long)lIceEmptyBaselineGram,
+					(long)s_lIceScaleEmptyBaselineGram);
+			}
+		}
+	}
+	if ((lResult == 0) && (usIceAmount != 0U)) {
 		lResult = prvRunStep(60U, COFFEE3_DEVICE_ROBOT,
 			COFFEE3_ACTION_ROBOT_TO_ICE, 0U, 0U,
 			COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
 		if (lResult == 0) {
-			lResult = prvDispenseIce((uint16_t)(usIceAmount * 10U));
+			lResult = prvConfirmIceCup(lIceEmptyBaselineGram, 61U,
+				&lIceCupBaselineGram);
+		}
+		if (lResult == 0) {
+			lResult = prvDispenseIce(usIceAmount,
+				lIceCupBaselineGram);
 		}
 	}
 	if ((lResult == 0) && (ucNeedFlavorStation != 0U)) {
@@ -1880,7 +2142,7 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 			COFFEE3_PRODUCTION_COMPLETED, 179U, 0);
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 			COFFEE3_LOG_SOURCE_WORKFLOW, g_xCoffee3WorkflowStatus.usCurrentOrderId,
-			"Content complete; report production=2 before final placement; no host ACK needed");
+			"Content done; report production=2 before placement; no host ACK");
 		lResult = prvCheckOutputEmpty(1U);
 		if (lResult == 0) {
 			prvPublishOutput(1U, 2U);
@@ -1910,45 +2172,139 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 }
 
 /*-----------------------------------------------------------*/
-static int32_t prvDispenseIce(uint16_t usTargetDecigram)
+static int32_t prvConfirmIceCup(int32_t lEmptyBaselineGram,
+	uint16_t usStepBase, int32_t *plCupBaselineGram)
+{
+	int32_t lResult;
+	int32_t lCupWeightGram;
+	int32_t lTotalWeightGram;
+	uint8_t ucCommRetry;
+	uint8_t ucNoCupAttempt;
+
+	if (plCupBaselineGram == NULL) {
+		return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
+	}
+	ucCommRetry = 0U;
+	ucNoCupAttempt = 0U;
+	lCupWeightGram = 0;
+	lTotalWeightGram = 0;
+	vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_CUP_FIRST_SETTLE_MS));
+	for (;;) {
+		lResult = prvReadStableScale(usStepBase, &lTotalWeightGram);
+		if (lResult != 0) {
+			ucCommRetry++;
+			if (ucCommRetry >= COFFEE3_ICE_CUP_COMM_RETRIES) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.usCurrentOrderId,
+					"Cup check failed: reason=scale read try=%u/%u result=%ld",
+					(unsigned int)ucCommRetry,
+					(unsigned int)COFFEE3_ICE_CUP_COMM_RETRIES,
+					(long)lResult);
+				return lResult;
+			}
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Cup check retry: reason=scale read try=%u/%u result=%ld",
+				(unsigned int)ucCommRetry,
+				(unsigned int)COFFEE3_ICE_CUP_COMM_RETRIES,
+				(long)lResult);
+			vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_CUP_RETRY_MS));
+			continue;
+		}
+		ucCommRetry = 0U;
+		lCupWeightGram = lTotalWeightGram - lEmptyBaselineGram;
+		*plCupBaselineGram = lTotalWeightGram;
+		if (lCupWeightGram > COFFEE3_ICE_CUP_MAX_GRAM) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Cup check failed: reason=weight high cup=%ld g max=%ld g",
+				(long)lCupWeightGram,
+				(long)COFFEE3_ICE_CUP_MAX_GRAM);
+			return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
+		}
+		if (lCupWeightGram > COFFEE3_ICE_CUP_DETECT_GRAM) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Cup confirmed: cup=%ld g total=%ld g empty=%ld g",
+				(long)lCupWeightGram, (long)lTotalWeightGram,
+				(long)lEmptyBaselineGram);
+			return 0;
+		}
+		ucNoCupAttempt++;
+		if (ucNoCupAttempt >= COFFEE3_ICE_CUP_DETECT_ATTEMPTS) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Cup check failed: reason=no cup weight=%ld g try=%u/%u",
+				(long)lCupWeightGram, (unsigned int)ucNoCupAttempt,
+				(unsigned int)COFFEE3_ICE_CUP_DETECT_ATTEMPTS);
+			return COFFEE3_WORKFLOW_ERROR_ICE_NO_CUP;
+		}
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Cup check retry: reason=no cup weight=%ld g try=%u/%u",
+			(long)lCupWeightGram, (unsigned int)ucNoCupAttempt,
+			(unsigned int)COFFEE3_ICE_CUP_DETECT_ATTEMPTS);
+		vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_CUP_RETRY_MS));
+	}
+}
+
+/*-----------------------------------------------------------*/
+static int32_t prvDispenseIce(uint16_t usTargetGram,
+	int32_t lCupBaselineGram)
 {
 	int32_t lResult;
 	int32_t lCloseResult;
-	int32_t lWeightDecigram;
-	int32_t lDeficitDecigram;
+	int32_t lWeightGram;
+	int32_t lTotalWeightGram;
+	int32_t lDeficitGram;
+	int32_t lSafeMinGram;
+	int32_t lSafeMaxGram;
+	int32_t lDeviationGram;
 	uint32_t ulPulseMs;
 	uint32_t ulWaitedMs;
 	uint8_t ucAttempt;
+	uint16_t usSlopeMsPerGram;
 
-	if (usTargetDecigram == 0U) {
+	if (usTargetGram == 0U) {
 		return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
 	}
-	lWeightDecigram = 0;
-	lResult = prvRunStep(100U, COFFEE3_DEVICE_SCALE,
-		COFFEE3_ACTION_SCALE_TARE, 0U, 0U, 3000U);
-	if (lResult != 0) {
-		return lResult;
-	}
-	vTaskDelay(pdMS_TO_TICKS(300U));
-	lResult = prvReadStableScale(&lWeightDecigram);
-	if ((lResult != 0) ||
-		(lWeightDecigram < -COFFEE3_ICE_TOLERANCE_DECIGRAM) ||
-		(lWeightDecigram > COFFEE3_ICE_TOLERANCE_DECIGRAM)) {
-		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_ERROR,
-			COFFEE3_LOG_SOURCE_WORKFLOW, "ICE_TARE_UNSTABLE",
-			COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT, "weight_dg",
-			lWeightDecigram);
-		return (lResult != 0) ? lResult :
-			COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
-	}
-	lDeficitDecigram = (int32_t)usTargetDecigram;
+	/* Integer-only safety bounds: lower is rounded up, upper is rounded down.
+	 * This keeps the accepted integer-gram range inside 70%..130%. */
+	lSafeMinGram = (int32_t)(((uint32_t)usTargetGram *
+		COFFEE3_ICE_SAFE_MIN_PERCENT + 99U) / 100U);
+	lSafeMaxGram = (int32_t)(((uint32_t)usTargetGram *
+		COFFEE3_ICE_SAFE_MAX_PERCENT) / 100U);
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW,
+		g_xCoffee3WorkflowStatus.usCurrentOrderId,
+		"Ice start: target=%u g cup_base=%ld g",
+		(unsigned int)usTargetGram, (long)lCupBaselineGram);
+	/* Keep one calibration value for the entire dispense and correction cycle. */
+	usSlopeMsPerGram = usCoffee3ConfigIceSlopeMsPerGram();
+	(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW, "ICE_SLOPE_SELECTED", 0,
+		"ms_per_g", (int32_t)usSlopeMsPerGram);
+	lWeightGram = 0;
+	lTotalWeightGram = lCupBaselineGram;
+	lDeficitGram = (int32_t)usTargetGram;
 	for (ucAttempt = 0U;
 		ucAttempt <= COFFEE3_ICE_MAX_CORRECTIONS; ucAttempt++) {
 		ulPulseMs = prvCalculateIcePulseMs(
-			(uint16_t)lDeficitDecigram);
-		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_INFO,
-			COFFEE3_LOG_SOURCE_WORKFLOW, "ICE_VALVE_PULSE", 0,
-			"pulse_ms", (int32_t)ulPulseMs);
+			(uint16_t)lDeficitGram, usSlopeMsPerGram,
+			ucAttempt);
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Ice valve open: try=%u/%u pulse=%lu ms deficit=%ld g",
+			(unsigned int)(ucAttempt + 1U),
+			(unsigned int)(COFFEE3_ICE_MAX_CORRECTIONS + 1U),
+			(unsigned long)ulPulseMs, (long)lDeficitGram);
 		lResult = prvRunStep((uint16_t)(101U + ucAttempt * 4U),
 			COFFEE3_DEVICE_ICE_MACHINE,
 			COFFEE3_ACTION_ICE_SET_VALVE, 1U, 0U, 3000U);
@@ -1958,8 +2314,8 @@ static int32_t prvDispenseIce(uint16_t usTargetDecigram)
 				lResult = COFFEE3_WORKFLOW_ERROR_CANCELED;
 				break;
 			}
-			vTaskDelay(pdMS_TO_TICKS(50U));
-			ulWaitedMs += 50U;
+			vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_PULSE_STEP_MS));
+			ulWaitedMs += COFFEE3_ICE_PULSE_STEP_MS;
 		}
 		lCloseResult = prvRunStep(
 			(uint16_t)(102U + ucAttempt * 4U),
@@ -1969,74 +2325,156 @@ static int32_t prvDispenseIce(uint16_t usTargetDecigram)
 			lResult = lCloseResult;
 		}
 		if (lResult != 0) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Ice dispense failed: step=valve close result=%ld",
+				(long)lResult);
 			return lResult;
 		}
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Ice valve closed: try=%u reason=pulse complete result=0",
+			(unsigned int)(ucAttempt + 1U));
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Ice weight wait: try=%u settle_ms=%u reason=ice settle",
+			(unsigned int)(ucAttempt + 1U),
+			(unsigned int)COFFEE3_ICE_SETTLE_MS);
 		vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_SETTLE_MS));
-		lResult = prvReadStableScale(&lWeightDecigram);
+		lResult = prvReadStableScale(
+			(uint16_t)(300U + (uint16_t)ucAttempt * 3U),
+			&lTotalWeightGram);
 		if (lResult != 0) {
 			return lResult;
 		}
-		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_INFO,
-			COFFEE3_LOG_SOURCE_WORKFLOW, "ICE_WEIGHT_SAMPLE", 0,
-			"weight_dg", lWeightDecigram);
-		lDeficitDecigram = (int32_t)usTargetDecigram -
-			lWeightDecigram;
-		if ((lDeficitDecigram >=
-			-COFFEE3_ICE_TOLERANCE_DECIGRAM) &&
-			(lDeficitDecigram <=
-				COFFEE3_ICE_TOLERANCE_DECIGRAM)) {
+		lWeightGram = lTotalWeightGram - lCupBaselineGram;
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Ice weight: try=%u/%u target=%u g actual=%ld g total=%ld g last=%d",
+			(unsigned int)(ucAttempt + 1U),
+			(unsigned int)(COFFEE3_ICE_MAX_CORRECTIONS + 1U),
+			(unsigned int)usTargetGram, (long)lWeightGram,
+			(long)lTotalWeightGram,
+			(int)g_xCoffee3ScaleImage.sRawValue);
+		lDeficitGram = (int32_t)usTargetGram - lWeightGram;
+		lDeviationGram = -lDeficitGram;
+		if (lDeviationGram < 0) {
+			lDeviationGram = -lDeviationGram;
+		}
+		if (lDeviationGram > COFFEE3_ICE_TOLERANCE_GRAM) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Ice weight warning: target=%u g actual=%ld g deviation=%ld g",
+				(unsigned int)usTargetGram, (long)lWeightGram,
+				(long)(-lDeficitGram));
+		}
+		/* Ice cannot be removed after it is dispensed. A high result is therefore
+		 * final immediately; only the configured safety range decides failure. */
+		if (lWeightGram > lSafeMaxGram) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Ice failed: reason=above 130%% target=%u g actual=%ld g limit=%ld g",
+				(unsigned int)usTargetGram, (long)lWeightGram,
+				(long)lSafeMaxGram);
+			return COFFEE3_WORKFLOW_ERROR_ICE_RANGE;
+		}
+		if (lDeficitGram <= 0) {
+			(void)xCoffee3LogPrintfOrder(
+				(lDeviationGram > COFFEE3_ICE_TOLERANCE_GRAM) ?
+				COFFEE3_LOG_LEVEL_WARNING : COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Ice done: reason=target reached target=%u g actual=%ld g",
+				(unsigned int)usTargetGram, (long)lWeightGram);
 			return 0;
 		}
-		if (lDeficitDecigram < 0) {
-			(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_ERROR,
-				COFFEE3_LOG_SOURCE_WORKFLOW, "ICE_WEIGHT_OVER",
-				COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT, "over_dg",
-				-lDeficitDecigram);
-			return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
+		if (ucAttempt == COFFEE3_ICE_MAX_CORRECTIONS) {
+			if (lWeightGram < lSafeMinGram) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.usCurrentOrderId,
+					"Ice failed: reason=below 70%% target=%u g actual=%ld g limit=%ld g",
+					(unsigned int)usTargetGram, (long)lWeightGram,
+					(long)lSafeMinGram);
+				return COFFEE3_WORKFLOW_ERROR_ICE_RANGE;
+			}
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Ice done: reason=low but safe target=%u g actual=%ld g limit=%ld g",
+				(unsigned int)usTargetGram, (long)lWeightGram,
+				(long)lSafeMinGram);
+			return 0;
 		}
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW,
+			g_xCoffee3WorkflowStatus.usCurrentOrderId,
+			"Ice correction: target=%u g actual=%ld g deficit=%ld g",
+			(unsigned int)usTargetGram, (long)lWeightGram,
+			(long)lDeficitGram);
 	}
-	lCloseResult = prvRunStep(119U, COFFEE3_DEVICE_ICE_MACHINE,
-		COFFEE3_ACTION_ICE_SET_VALVE, 0U, 0U, 3000U);
-	(void)lCloseResult;
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
+		COFFEE3_LOG_SOURCE_WORKFLOW,
+		g_xCoffee3WorkflowStatus.usCurrentOrderId,
+		"Ice failed: reason=correction limit target=%u g actual=%ld g corrections=%u",
+		(unsigned int)usTargetGram, (long)lWeightGram,
+		(unsigned int)COFFEE3_ICE_MAX_CORRECTIONS);
 	return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
 }
 
 /*-----------------------------------------------------------*/
-static uint32_t prvCalculateIcePulseMs(uint16_t usTargetDecigram)
+static uint32_t prvCalculateIcePulseMs(uint16_t usTargetGram,
+	uint16_t usSlopeMsPerGram, uint8_t ucAttempt)
 {
 	int32_t lPulseMs;
+	int32_t lMaximumMs;
 
-	lPulseMs = (((int32_t)usTargetDecigram *
-		COFFEE3_ICE_SLOPE_MS_PER_GRAM) + 5L) / 10L;
-	lPulseMs += COFFEE3_ICE_OFFSET_MS;
-	lPulseMs = lPulseMs * COFFEE3_ICE_COMPENSATION_FACTOR;
+	lPulseMs = (int32_t)usTargetGram * (int32_t)usSlopeMsPerGram;
+	lPulseMs += COFFEE3_ICE_CORRECTION_OFFSET_MS;
+	lMaximumMs = (int32_t)COFFEE3_ICE_MAX_PULSE_MS;
+	if (ucAttempt == 0U) {
+		lMaximumMs = (usTargetGram < COFFEE3_ICE_INITIAL_SPLIT_GRAM) ?
+			(int32_t)COFFEE3_ICE_INITIAL_SMALL_MS :
+			(int32_t)COFFEE3_ICE_INITIAL_LARGE_MS;
+	}
 	if (lPulseMs < (int32_t)COFFEE3_ICE_MIN_PULSE_MS) {
 		lPulseMs = (int32_t)COFFEE3_ICE_MIN_PULSE_MS;
-	} else if (lPulseMs > (int32_t)COFFEE3_ICE_MAX_PULSE_MS) {
-		lPulseMs = (int32_t)COFFEE3_ICE_MAX_PULSE_MS;
+	}
+	lPulseMs = ((lPulseMs + (int32_t)COFFEE3_ICE_PULSE_STEP_MS - 1L) /
+		(int32_t)COFFEE3_ICE_PULSE_STEP_MS) *
+		(int32_t)COFFEE3_ICE_PULSE_STEP_MS;
+	if (lPulseMs > lMaximumMs) {
+		lPulseMs = lMaximumMs;
 	}
 	return (uint32_t)lPulseMs;
 }
 
 /*-----------------------------------------------------------*/
-static int32_t prvReadStableScale(int32_t *plWeightDecigram)
+static int32_t prvReadStableScale(uint16_t usStepBase,
+	int32_t *plWeightGram)
 {
 	int32_t alSample[3];
 	int32_t lSwap;
 	int32_t lResult;
 	uint8_t ucIndex;
 
-	if (plWeightDecigram == NULL) {
+	if (plWeightGram == NULL) {
 		return COFFEE3_WORKFLOW_ERROR_ICE_WEIGHT;
 	}
 	for (ucIndex = 0U; ucIndex < 3U; ucIndex++) {
-		lResult = prvRunStep((uint16_t)(120U + ucIndex),
+		lResult = prvRunStep((uint16_t)(usStepBase + ucIndex),
 			COFFEE3_DEVICE_SCALE, COFFEE3_ACTION_REFRESH,
 			0U, 0U, 3000U);
 		if (lResult != 0) {
 			return lResult;
 		}
-		alSample[ucIndex] = g_xCoffee3ScaleImage.lWeightTenthGram;
+		alSample[ucIndex] = g_xCoffee3ScaleImage.lWeightGram;
 		vTaskDelay(pdMS_TO_TICKS(100U));
 	}
 	if (alSample[0] > alSample[1]) {
@@ -2054,7 +2492,7 @@ static int32_t prvReadStableScale(int32_t *plWeightDecigram)
 		alSample[0] = alSample[1];
 		alSample[1] = lSwap;
 	}
-	*plWeightDecigram = alSample[1];
+	*plWeightGram = alSample[1];
 	return 0;
 }
 
@@ -3039,67 +3477,70 @@ static int32_t prvAbortDevices(void)
 /*-----------------------------------------------------------*/
 static void prvServiceIoRefresh(void)
 {
-	static const Coffee3DeviceId_e axIdleRefreshDevices[] = {
-		COFFEE3_DEVICE_COFFEE_MACHINE,
-		COFFEE3_DEVICE_CUP_MACHINE,
-		COFFEE3_DEVICE_SYRUP_MACHINE,
-		COFFEE3_DEVICE_LID_MACHINE,
-		COFFEE3_DEVICE_ICE_MACHINE,
-		COFFEE3_DEVICE_SCALE,
-		COFFEE3_DEVICE_POWER_METER
-	};
-	static TickType_t xNextRefreshTick;
-	static uint8_t ucIdleRefreshIndex;
-	static uint32_t aulPendingId[COFFEE3_DEVICE_COUNT];
-	Coffee3Command_t xCommand;
-	TickType_t xNow;
-	uint8_t ucIndex;
-	uint8_t ucCount;
-	Coffee3DeviceId_e axDevices[3];
-
-	xNow = xTaskGetTickCount();
+	/* RTU owners now refresh their own devices. Workflow only samples local
+	 * GPIO here; it must not flood every Bus queue with periodic reads. */
 	prvServicePickup();
-	if ((int32_t)(xNow - xNextRefreshTick) < 0) {
-		return;
-	}
-	xNextRefreshTick = xNow +
-		pdMS_TO_TICKS(COFFEE3_WORKFLOW_IO_REFRESH_MS);
 	vCoffee3IoRefreshLocal();
-	memset(&xCommand, 0, sizeof(xCommand));
-	xCommand.ucSource = (uint8_t)COFFEE3_COMMAND_SOURCE_WORKFLOW;
-	xCommand.usAction = (uint16_t)COFFEE3_ACTION_REFRESH;
-	xCommand.ulTimeoutMs = 1000U;
-	axDevices[0] = COFFEE3_DEVICE_IO_INPUT;
-	axDevices[1] = COFFEE3_DEVICE_IO_OUTPUT;
-	ucCount = 2U;
-	if ((g_xCoffee3WorkflowStatus.xState !=
-		COFFEE3_WORKFLOW_RUNNING) &&
-		(g_xCoffee3WorkflowStatus.xState !=
-		COFFEE3_WORKFLOW_CANCELING)) {
-		axDevices[ucCount++] = axIdleRefreshDevices[ucIdleRefreshIndex];
-		ucIdleRefreshIndex++;
-		if (ucIdleRefreshIndex >=
-			(sizeof(axIdleRefreshDevices) /
-				sizeof(axIdleRefreshDevices[0]))) {
-			ucIdleRefreshIndex = 0U;
-		}
-	}
-	for (ucIndex = 0U; ucIndex < ucCount; ucIndex++) {
-		xCommand.ucDeviceId = (uint8_t)axDevices[ucIndex];
-		if ((aulPendingId[xCommand.ucDeviceId] != 0U) &&
-			((xCoffee3DeviceWaitCommand(axDevices[ucIndex], 0U,
-			 aulPendingId[xCommand.ucDeviceId], 0U) &
-			 COFFEE3_DEVICE_EVENT_TERMINAL) == 0U)) {
-			continue;
-		}
-		xCommand.ulCommandId = 0U;
-		if (xCoffee3CommandSubmit(&xCommand, 0U) == pdPASS) {
-			aulPendingId[xCommand.ucDeviceId] = xCommand.ulCommandId;
-		}
+}
+
+/*-----------------------------------------------------------*/
+static const char *prvWorkflowDeviceName(Coffee3DeviceId_e xDeviceId)
+{
+	switch (xDeviceId) {
+	case COFFEE3_DEVICE_ROBOT: return "Robot";
+	case COFFEE3_DEVICE_COFFEE_MACHINE: return "CoffeeMachine";
+	case COFFEE3_DEVICE_CUP_MACHINE: return "CupMachine";
+	case COFFEE3_DEVICE_SYRUP_MACHINE: return "SyrupMachine";
+	case COFFEE3_DEVICE_LID_MACHINE: return "LidMachine";
+	case COFFEE3_DEVICE_ICE_MACHINE: return "IceMachine";
+	case COFFEE3_DEVICE_SCALE: return "Weigh Scale";
+	case COFFEE3_DEVICE_POWER_METER: return "EnergyMeter";
+	case COFFEE3_DEVICE_IO_INPUT: return "IoInput";
+	case COFFEE3_DEVICE_IO_OUTPUT: return "IoOutput";
+	default: return "UnknownDevice";
 	}
 }
 
 /*-----------------------------------------------------------*/
+/*-----------------------------------------------------------*/
+static const char *prvWorkflowActionName(Coffee3Action_e xAction)
+{
+ switch (xAction) {
+ case COFFEE3_ACTION_REFRESH: return "status refresh";
+ case COFFEE3_ACTION_SCALE_TARE: return "tare scale";
+ case COFFEE3_ACTION_SCALE_CLEAR_TARE: return "clear scale tare";
+ case COFFEE3_ACTION_SCALE_ZERO: return "zero scale";
+ case COFFEE3_ACTION_ICE_SET_VALVE: return "set ice valve";
+ case COFFEE3_ACTION_COFFEE_MAKE: return "make coffee";
+ case COFFEE3_ACTION_COFFEE_CLEAN: return "clean coffee";
+ case COFFEE3_ACTION_SYRUP_DISPENSE: return "dispense syrup";
+ case COFFEE3_ACTION_SYRUP_CLEAN: return "clean syrup";
+ case COFFEE3_ACTION_CUP_DROP_1: return "drop cup 1";
+ case COFFEE3_ACTION_CUP_DROP_2: return "drop cup 2";
+ case COFFEE3_ACTION_LID_DROP_1: return "drop lid 1";
+ case COFFEE3_ACTION_LID_DROP_2: return "drop lid 2";
+ case COFFEE3_ACTION_ROBOT_HOME: return "robot home";
+ case COFFEE3_ACTION_ROBOT_TO_COFFEE: return "move to coffee";
+ case COFFEE3_ACTION_ROBOT_TO_ICE: return "move to ice";
+ case COFFEE3_ACTION_ROBOT_TO_LID: return "move to lid";
+ case COFFEE3_ACTION_ROBOT_TAKE_HOT_CUP: return "take hot cup";
+ case COFFEE3_ACTION_ROBOT_TAKE_COLD_CUP: return "take cold cup";
+ case COFFEE3_ACTION_ROBOT_TAKE_COFFEE: return "take coffee";
+ case COFFEE3_ACTION_ROBOT_TAKE_LID: return "take lid";
+ case COFFEE3_ACTION_ROBOT_COVER_LID: return "cover lid";
+ case COFFEE3_ACTION_ROBOT_PUT_OUTPUT: return "put output";
+ case COFFEE3_ACTION_ROBOT_PUT_STORAGE: return "put storage";
+ case COFFEE3_ACTION_ROBOT_TAKE_STORAGE: return "take storage";
+ case COFFEE3_ACTION_ROBOT_START: return "robot start";
+ case COFFEE3_ACTION_ROBOT_STOP: return "robot stop";
+ case COFFEE3_ACTION_ROBOT_ENABLE: return "robot enable";
+ case COFFEE3_ACTION_ROBOT_CLEAR_ALARM: return "clear robot alarm";
+ case COFFEE3_ACTION_IO_WRITE: return "write IO";
+ case COFFEE3_ACTION_IO_WRITE_MASK: return "write IO mask";
+ case COFFEE3_ACTION_CANCEL: return "cancel";
+ default: return "unknown action";
+ }
+}
 static void prvPublish(Coffee3WorkflowState_e xState,
 	uint16_t usStep, int32_t lError)
 {
@@ -3192,7 +3633,7 @@ static int32_t prvRunStoragePickup(uint16_t usStorage)
 		(s_ausStoredOrderId[usStorage - 1U] == 0U)) {
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-			"Pickup rejected: storage=%u has no bound finished order (residual/unknown cup)",
+			"Pickup rejected: storage=%u has no finished order (residual/unknown cup)",
 			(unsigned int)usStorage);
 		return COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED;
 	}

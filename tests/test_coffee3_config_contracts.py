@@ -118,6 +118,54 @@ class ConfigContracts(unittest.TestCase):
         self.assertIn('usCoffee3ConfigFruitCoefficient(ucChannel)', workflow)
         self.assertNotIn('COFFEE3_FRUIT_MILK_MS_PER_ML', workflow)
 
+    def test_ice_slope_is_persisted_and_applied(self):
+        header = read(APP / 'Config/coffee3_config.h')
+        config = read(APP / 'Config/coffee3_config.c')
+        server = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
+        workflow = read(APP / 'WorkFlow/coffee3_workflow.c')
+        self.assertIn('ulIceSlopeMsPerGram;', header)
+        self.assertIn('COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM 10U', header)
+        self.assertIn('(3U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT)', config)
+        self.assertIn('pulWords[2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT] =', config)
+        self.assertIn('xLoaded.ulIceSlopeMsPerGram =', config)
+        self.assertIn('xCoffee3ConfigSetIceSlopeMsPerGram(', config)
+        self.assertIn('usCoffee3ConfigIceSlopeMsPerGram()', server)
+        self.assertIn('xCoffee3ConfigSetIceSlopeMsPerGram(\n\t\t\t\t\tusIceSlope)', server)
+        self.assertLess(server.index('xCoffee3WorkflowAcquireManual()'),
+                        server.index('xCoffee3ConfigSetIceSlopeMsPerGram('))
+        self.assertLess(server.index('xCoffee3ConfigSetIceSlopeMsPerGram('),
+                        server.index('vCoffee3WorkflowReleaseManual();'))
+        self.assertIn('usSlopeMsPerGram = usCoffee3ConfigIceSlopeMsPerGram();',
+                      workflow)
+        self.assertIn('(int32_t)usTargetGram * (int32_t)usSlopeMsPerGram;',
+                      workflow)
+        self.assertNotIn('ice coefficient is accepted but not applied', server)
+
+    def test_ice_pulses_use_coffee1_baseline_and_three_corrections(self):
+        settings = read(APP / 'Config/coffee3_app_config.h')
+        workflow = read(APP / 'WorkFlow/coffee3_workflow.c')
+        for setting in ('COFFEE3_ICE_INITIAL_SPLIT_GRAM        120U',
+                        'COFFEE3_ICE_INITIAL_SMALL_MS          800U',
+                        'COFFEE3_ICE_INITIAL_LARGE_MS          1200U',
+                        'COFFEE3_ICE_CORRECTION_OFFSET_MS      100L',
+                        'COFFEE3_ICE_MIN_PULSE_MS              200U',
+                        'COFFEE3_ICE_MAX_PULSE_MS              2000U',
+                        'COFFEE3_ICE_SETTLE_MS                 1600U',
+                        'COFFEE3_ICE_BASELINE_TOLERANCE_GRAM    2L',
+                        'COFFEE3_ICE_TOLERANCE_GRAM            15L',
+                        'COFFEE3_ICE_MAX_CORRECTIONS           4U'):
+            self.assertIn(setting, settings)
+        self.assertIn('ucAttempt <= COFFEE3_ICE_MAX_CORRECTIONS', workflow)
+        self.assertIn('COFFEE3_ICE_INITIAL_SPLIT_GRAM', workflow)
+        self.assertIn('COFFEE3_ICE_CORRECTION_OFFSET_MS', workflow)
+        self.assertIn('COFFEE3_ICE_BASELINE_TOLERANCE_GRAM', workflow)
+        self.assertIn('COFFEE3_ICE_PULSE_STEP_MS', workflow)
+        self.assertIn('Ice done: reason=target reached target=%u g actual=%ld g',
+                      workflow)
+        self.assertIn('Ice correction: target=%u g actual=%ld g deficit=%ld g',
+                      workflow)
+        self.assertNotIn('DECIGRAM', settings)
+
     def test_persist_before_register_publication(self):
         code = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
         code = code[code.index('/* Persist before publishing'):]

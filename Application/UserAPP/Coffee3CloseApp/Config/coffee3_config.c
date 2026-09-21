@@ -7,7 +7,7 @@
 #include <stddef.h>
 
 #define COFFEE3_CONFIG_WORD_COUNT \
-	(2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT)
+	(3U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT)
 
 static Coffee3Config_t s_xConfig;
 static uint8_t s_ucValid;
@@ -24,6 +24,8 @@ static void prvEncodeConfig(const Coffee3Config_t *pxConfig,
 		ucIndex++) {
 		pulWords[2U + ucIndex] = pxConfig->aulFruitCoefficient[ucIndex];
 	}
+	pulWords[2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT] =
+		pxConfig->ulIceSlopeMsPerGram;
 }
 
 /*-----------------------------------------------------------*/
@@ -62,6 +64,15 @@ uint16_t usCoffee3ConfigFruitCoefficient(uint8_t ucChannel)
 		return COFFEE3_CONFIG_FRUIT_COEFFICIENT_DEFAULT;
 	}
 	return (uint16_t)s_xConfig.aulFruitCoefficient[ucChannel - 1U];
+}
+
+/*-----------------------------------------------------------*/
+uint16_t usCoffee3ConfigIceSlopeMsPerGram(void)
+{
+	if (s_ucValid == 0U) {
+		return COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM;
+	}
+	return (uint16_t)s_xConfig.ulIceSlopeMsPerGram;
 }
 
 ConfigStoreResult_e xCoffee3ConfigSetStorageMask(uint16_t usMask)
@@ -130,6 +141,38 @@ ConfigStoreResult_e xCoffee3ConfigSetFruitCoefficients(
 	return xResult;
 }
 
+/*-----------------------------------------------------------*/
+ConfigStoreResult_e xCoffee3ConfigSetIceSlopeMsPerGram(uint16_t usSlope)
+{
+	Coffee3Config_t xNext;
+	ConfigStoreResult_e xResult;
+
+	/* A zero written by a legacy host restores the documented default. */
+	if (usSlope == 0U) {
+		usSlope = COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM;
+	}
+	if ((usSlope < COFFEE3_CONFIG_ICE_SLOPE_MIN_MS_PER_GRAM) ||
+		(usSlope > COFFEE3_CONFIG_ICE_SLOPE_MAX_MS_PER_GRAM) ||
+		(s_ucValid == 0U)) {
+		return CONFIG_STORE_INVALID;
+	}
+	if (s_xConfig.ulIceSlopeMsPerGram == usSlope) {
+		return CONFIG_STORE_OK;
+	}
+	xNext = s_xConfig;
+	xNext.ulIceSlopeMsPerGram = usSlope;
+	xResult = prvSaveConfig(&xNext);
+	if (xResult == CONFIG_STORE_OK) {
+		s_xConfig = xNext;
+	}
+	(void)xCoffee3LogPrintfOrder((xResult == CONFIG_STORE_OK) ?
+		COFFEE3_LOG_LEVEL_INFO : COFFEE3_LOG_LEVEL_ERROR,
+		COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+		"Ice slope save: ms_per_g=%u result=%u",
+		(unsigned int)usSlope, (unsigned int)xResult);
+	return xResult;
+}
+
 ConfigStoreResult_e xCoffee3ConfigInitialize(void)
 {
 	uint32_t aulWords[COFFEE3_CONFIG_WORD_COUNT];
@@ -162,6 +205,17 @@ ConfigStoreResult_e xCoffee3ConfigInitialize(void)
 					aulWords[2U + ucIndex];
 			}
 		}
+		if ((aulWords[2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT] <
+			COFFEE3_CONFIG_ICE_SLOPE_MIN_MS_PER_GRAM) ||
+			(aulWords[2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT] >
+			COFFEE3_CONFIG_ICE_SLOPE_MAX_MS_PER_GRAM)) {
+			xLoaded.ulIceSlopeMsPerGram =
+				COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM;
+			ucNeedsSave = 1U;
+		} else {
+			xLoaded.ulIceSlopeMsPerGram =
+				aulWords[2U + COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT];
+		}
 		s_xConfig = xLoaded;
 		s_ucValid = 1U;
 		if (ucNeedsSave != 0U) {
@@ -180,6 +234,9 @@ ConfigStoreResult_e xCoffee3ConfigInitialize(void)
 			(unsigned int)s_xConfig.aulFruitCoefficient[3],
 			(unsigned int)s_xConfig.aulFruitCoefficient[4],
 			(unsigned int)s_xConfig.aulFruitCoefficient[5]);
+		(void)xCoffee3LogWriteField(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_SYSTEM, "ICE_SLOPE_LOADED", 0,
+			"ms_per_g", (int32_t)s_xConfig.ulIceSlopeMsPerGram);
 		return CONFIG_STORE_OK;
 	}
 	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
@@ -192,6 +249,8 @@ ConfigStoreResult_e xCoffee3ConfigInitialize(void)
 		s_xConfig.aulFruitCoefficient[ucIndex] =
 			COFFEE3_CONFIG_FRUIT_COEFFICIENT_DEFAULT;
 	}
+	s_xConfig.ulIceSlopeMsPerGram =
+		COFFEE3_CONFIG_ICE_SLOPE_DEFAULT_MS_PER_GRAM;
 	xResult = prvSaveConfig(&s_xConfig);
 	if (xResult == CONFIG_STORE_OK) {
 		s_ucValid = 1U;

@@ -34,8 +34,12 @@ typedef enum {
 	TRANSPORT_RESULT_NOT_OPEN = -7, /*!< Channel has no active endpoint. */
 	TRANSPORT_RESULT_NOT_SUPPORTED = -8, /*!< Backend lacks the operation. */
 	TRANSPORT_RESULT_NOT_READY = -9, /*!< Link or hardware is not ready. */
-	TRANSPORT_RESULT_DISCONNECTED = -10 /*!< Peer closed or reset the link. */
+	TRANSPORT_RESULT_DISCONNECTED = -10, /*!< Peer closed or reset the link. */
+	TRANSPORT_RESULT_CANCELED = -11 /*!< Owner intentionally abandoned this frame. */
 } TransportResult_e;
+
+/** @brief Return nonzero when an owner wants a receive transaction abandoned. */
+typedef uint8_t (*TransportPreemptCheck_t)(void *pvContext);
 
 /** @brief Define lifecycle states shared by every Transport backend. */
 typedef enum {
@@ -245,6 +249,15 @@ TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
 										 uint16_t usExpectedLen,
 										 uint16_t *pusReceivedLen,
 										 uint32_t ulTimeoutMs);
+
+/**
+  * @brief Receive an exact byte count while allowing the owner to abandon a frame.
+  * @note The callback runs in task context and must not block.
+  */
+TransportResult_e xTransportReceiveExactCancelable(
+	TransportChannel_t *pxChannel, uint8_t *pucData, uint16_t usExpectedLen,
+	uint16_t *pusReceivedLen, uint32_t ulTimeoutMs,
+	TransportPreemptCheck_t pxCheck, void *pvCheckContext);
 
 /**
   * @brief Dispatch a generic control request to a channel backend.

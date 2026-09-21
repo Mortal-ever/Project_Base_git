@@ -157,13 +157,14 @@ Coffee3LogResult_e xCoffee3LogPrintfOrder(Coffee3LogLevel_e xLevel,
 {
 	/* Format into a bounded stack buffer before copying text into the common
 	 * record. Truncation is preferred to unbounded allocation in a task. */
-	char acText[72];
+	char acText[96];
 	va_list xArguments;
 	int lLength;
 
 	if (pcFormat == NULL) {
 		return COFFEE3_LOG_RESULT_INVALID_ARG;
 	}
+	// 从 pcFormat 后面开始，准备读取那些 ... 参数
 	va_start(xArguments, pcFormat);
 	lLength = vsnprintf(acText, sizeof(acText), pcFormat, xArguments);
 	va_end(xArguments);

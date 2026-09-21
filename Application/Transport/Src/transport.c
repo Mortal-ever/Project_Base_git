@@ -223,9 +223,10 @@ TransportResult_e xTransportReceive(TransportChannel_t *pxChannel,
  * backends can report no data before the overall deadline expires.
  */
 /*-----------------------------------------------------------*/
-TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
-	uint8_t *pucData, uint16_t usExpectedLen, uint16_t *pusReceivedLen,
-	uint32_t ulTimeoutMs)
+TransportResult_e xTransportReceiveExactCancelable(
+	TransportChannel_t *pxChannel, uint8_t *pucData, uint16_t usExpectedLen,
+	uint16_t *pusReceivedLen, uint32_t ulTimeoutMs,
+	TransportPreemptCheck_t pxCheck, void *pvCheckContext)
 {
 	TransportResult_e xResult;
 	TickType_t xStart;
@@ -273,6 +274,10 @@ TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
 	xBudget = prvMsToTicks(ulTimeoutMs);
 
 	while (usOffset < usExpectedLen) {
+		if ((pxCheck != NULL) && (pxCheck(pvCheckContext) != 0U)) {
+			xResult = TRANSPORT_RESULT_CANCELED;
+			break;
+		}
 		xElapsed = xTaskGetTickCount() - xStart;
 		if (xElapsed >= xBudget) {
 			xResult = TRANSPORT_RESULT_TIMEOUT;
@@ -281,6 +286,11 @@ TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
 
 		xRemaining = xBudget - xElapsed;
 		ulRemainingMs = prvTicksToMsCeil(xRemaining);
+		if ((pxCheck != NULL) && (ulRemainingMs > 20U)) {
+			/* Polling reads are intentionally sliced so a foreground command
+			 * can abandon a silent slave without waiting the full frame budget. */
+			ulRemainingMs = 20U;
+		}
 		usReceived = 0U;
 		xResult = prvReceiveOnce(pxChannel, &pucData[usOffset],
 			(uint16_t)(usExpectedLen - usOffset), &usReceived,
@@ -322,6 +332,15 @@ TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
 	prvRecordOperation(pxChannel, TRANSPORT_OPERATION_RECEIVE, xResult,
 		usExpectedLen, usOffset);
 	return xResult;
+}
+
+/*-----------------------------------------------------------*/
+TransportResult_e xTransportReceiveExact(TransportChannel_t *pxChannel,
+	uint8_t *pucData, uint16_t usExpectedLen, uint16_t *pusReceivedLen,
+	uint32_t ulTimeoutMs)
+{
+	return xTransportReceiveExactCancelable(pxChannel, pucData, usExpectedLen,
+		pusReceivedLen, ulTimeoutMs, NULL, NULL);
 }
 
 /*-----------------------------------------------------------*/

@@ -131,12 +131,12 @@ uint8_t ucCoffee3WorkflowInitializationComplete(void);
 BaseType_t xCoffee3WorkflowSubmitOrder(const Coffee3Order_t *pxOrder);
 
 /**
-  * @brief Submit a maintenance ice-dispense request using scale feedback.
-  * @param[in] usTargetWeight Target weight in 0.1 g from register 0x0071.
+  * @brief Submit manual ice with cup detection and scale feedback.
+  * @param[in] usTargetGrams Target weight in grams from register 0x0071.
   * @retval pdPASS The maintenance request was accepted.
-  * @retval pdFAIL Workflow is busy, pending, or the target is zero.
+  * @retval pdFAIL Target is zero, workflow is busy, or ice/scale is not ready.
   */
-BaseType_t xCoffee3WorkflowSubmitManualIce(uint16_t usTargetWeight);
+BaseType_t xCoffee3WorkflowSubmitManualIce(uint16_t usTargetGrams);
 
 /** @brief Submit one non-order maintenance operation to Workflow. */
 BaseType_t xCoffee3WorkflowSubmitMaintenance(

@@ -83,6 +83,16 @@
 #define COFFEE3_COMMAND_QUEUE_LENGTH         4U
 #define COFFEE3_RTU_IO_TIMEOUT_MS            500U
 #define COFFEE3_RTU_IDLE_MS                  20U
+/** @brief Background health refresh period for ordinary RTU devices. */
+#define COFFEE3_RTU_POLL_PERIOD_MS           3000U
+/** @brief Startup phase offset between ordinary devices on one RTU bus. */
+#define COFFEE3_RTU_POLL_STAGGER_MS          200U
+/** @brief Bus5 external IO refresh cadence; two devices are phase shifted. */
+#define COFFEE3_RTU_IO_POLL_PERIOD_MS        100U
+#define COFFEE3_RTU_IO_POLL_STAGGER_MS       50U
+#define COFFEE3_RTU_POLL_TIMEOUT_MS          100U
+#define COFFEE3_RTU_OFFLINE_MISS_LIMIT       2U
+#define COFFEE3_RTU_IO_OFFLINE_MISS_LIMIT    3U
 
 /** @brief UART defaults reapplied by Coffee3 before task creation. */
 #define COFFEE3_BUS2_DEFAULT_BAUD            115200U
@@ -121,14 +131,27 @@
 #define COFFEE3_WORKFLOW_DEVICE_IO_TIMEOUT_MS  1000U
 #define COFFEE3_WORKFLOW_IO_ACTION_TIMEOUT_MS 5000U
 
-/** @brief Provisional linear ice calibration in 0.1 g and milliseconds. */
-#define COFFEE3_ICE_SLOPE_MS_PER_GRAM         18L
-#define COFFEE3_ICE_OFFSET_MS                 (-300L)
-#define COFFEE3_ICE_COMPENSATION_FACTOR      1L
+/** @brief Coffee1 Xiehou initial times and compensation baseline. */
+#define COFFEE3_ICE_INITIAL_SPLIT_GRAM        120U
+#define COFFEE3_ICE_INITIAL_SMALL_MS          800U
+#define COFFEE3_ICE_INITIAL_LARGE_MS          1200U
+#define COFFEE3_ICE_CORRECTION_OFFSET_MS      100L
 #define COFFEE3_ICE_MIN_PULSE_MS              200U
 #define COFFEE3_ICE_MAX_PULSE_MS              2000U
-#define COFFEE3_ICE_SETTLE_MS                 1000U
-#define COFFEE3_ICE_TOLERANCE_DECIGRAM        20L
-#define COFFEE3_ICE_MAX_CORRECTIONS           2U
+#define COFFEE3_ICE_PULSE_STEP_MS              50U
+#define COFFEE3_ICE_SETTLE_MS                 1600U
+#define COFFEE3_ICE_BASELINE_SETTLE_MS         300U
+#define COFFEE3_ICE_BASELINE_RETRY_MS         3000U
+#define COFFEE3_ICE_BASELINE_TOLERANCE_GRAM    2L
+#define COFFEE3_ICE_TOLERANCE_GRAM            15L
+#define COFFEE3_ICE_CUP_DETECT_GRAM           6L
+#define COFFEE3_ICE_CUP_MAX_GRAM              100L
+#define COFFEE3_ICE_CUP_FIRST_SETTLE_MS       500U
+#define COFFEE3_ICE_CUP_RETRY_MS              1000U
+#define COFFEE3_ICE_CUP_DETECT_ATTEMPTS       3U
+#define COFFEE3_ICE_CUP_COMM_RETRIES          10U
+#define COFFEE3_ICE_SAFE_MIN_PERCENT          70U
+#define COFFEE3_ICE_SAFE_MAX_PERCENT          130U
+#define COFFEE3_ICE_MAX_CORRECTIONS           4U
 
 #endif /* COFFEE3_APP_CONFIG_H */
