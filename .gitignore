@@ -29,3 +29,6 @@ MDK-ARM/List/
 *.map
 compile_commands.json
 MDK-ARM/.vscode/uv4.log
+
+# test files
+tests/
