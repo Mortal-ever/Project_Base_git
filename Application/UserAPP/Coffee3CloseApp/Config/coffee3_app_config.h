@@ -84,7 +84,7 @@
 #define COFFEE3_RTU_IO_TIMEOUT_MS            500U
 #define COFFEE3_RTU_IDLE_MS                  20U
 /** @brief Background health refresh period for ordinary RTU devices. */
-#define COFFEE3_RTU_POLL_PERIOD_MS           3000U
+#define COFFEE3_RTU_POLL_PERIOD_MS           5000U
 /** @brief Startup phase offset between ordinary devices on one RTU bus. */
 #define COFFEE3_RTU_POLL_STAGGER_MS          200U
 /** @brief Bus5 external IO refresh cadence; two devices are phase shifted. */
@@ -95,7 +95,7 @@
 #define COFFEE3_RTU_IO_OFFLINE_MISS_LIMIT    3U
 
 /** @brief UART defaults reapplied by Coffee3 before task creation. */
-#define COFFEE3_BUS2_DEFAULT_BAUD            115200U
+#define COFFEE3_BUS2_DEFAULT_BAUD            19200U
 #define COFFEE3_BUS3_DEFAULT_BAUD            9600U
 #define COFFEE3_BUS4_DEFAULT_BAUD            19200U
 #define COFFEE3_BUS5_DEFAULT_BAUD            38400U

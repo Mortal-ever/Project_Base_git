@@ -67,7 +67,7 @@ typedef struct {
 typedef struct {
 	ModbusPortResult_e xResult; /*!< Project-level transaction result. */
 	TransportResult_e xTransportResult; /*!< Latest Transport result. */
-	int32_t lProtocolCode; /*!< Native nanoMODBUS error or exception value. */
+	int32_t lProtocolCode; /*!< nanoMODBUS error or exception value. */
 	int32_t lNativeError; /*!< HAL, LwIP, or Socket backend error. */
 	uint8_t ucExceptionCode; /*!< Positive Modbus exception code, or zero. */
 } ModbusPortFault_t;

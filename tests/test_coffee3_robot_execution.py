@@ -183,17 +183,17 @@ class RobotExecution(unittest.TestCase):
                                value.to_bytes(size, "little"))
         return address
 
-    def test_pending_debug_waits_for_whole_order_and_preserves_first_request(self):
+    def test_pending_debug_uses_latest_request_and_dispatches_between_steps(self):
         self.global_value("s_ucInitializationComplete", 1)
         self.workflow_value("xState", 1)
         first = self.manual_command(1)
         second = self.manual_command(2)
         self.assertEqual(self.call("xCoffee3RobotTcpSubmitManualMotion", first), 1)
-        self.assertEqual(self.call("xCoffee3RobotTcpSubmitManualMotion", second), 0)
-        self.assertEqual(self.call("prvTakePendingManualMotion", self.done), 0)
-        self.workflow_value("xState", 2)
+        self.assertEqual(self.call("xCoffee3RobotTcpSubmitManualMotion", second), 1)
+        reservations = self.fw.symbols["s_usManualReservations"]
+        self.assertEqual(int.from_bytes(self.cpu.mem_read(reservations, 2), "little"), 1)
         self.assertEqual(self.call("prvTakePendingManualMotion", self.done), 1)
-        self.assertEqual(int.from_bytes(self.cpu.mem_read(self.done, 4), "little"), 1)
+        self.assertEqual(int.from_bytes(self.cpu.mem_read(self.done, 4), "little"), 2)
         self.assertEqual(self.call("prvTakePendingManualMotion", self.done), 0)
 
     def test_pickup_and_pending_maintenance_keep_dispatch_closed(self):
@@ -325,14 +325,16 @@ class RobotExecution(unittest.TestCase):
         self.assertEqual(self.get("ucCompletionObserved", 1), 1)
         self.assertEqual(self.get("xPhase"), 4)
 
-    def test_acceptance_deadline_is_bounded_without_retrigger(self):
+    def test_acceptance_deadline_marks_overdue_and_keeps_waiting(self):
         self.put("ucCommandWriteAttempted", 1, 1)
         self.put("ucCommandWriteConfirmed", 1, 1)
         self.put("xAcceptDeadline", 1000)
         self.put("xPhase", 2)
         self.read_values = {3136: 1, 3126: 0}
-        self.assertEqual(self.call("prvAdvanceAction", 0, self.transaction, self.done), -4)
-        self.assertEqual(bytes(self.cpu.mem_read(self.done, 1)), b"\1")
+        self.assertEqual(self.call("prvAdvanceAction", 0, self.transaction, self.done), -3)
+        self.assertEqual(bytes(self.cpu.mem_read(self.done, 1)), b"\0")
+        self.assertEqual(self.get("ucOverdue", 1), 1)
+        self.assertEqual(self.get("ucOverdueLogged", 1), 1)
         self.assertEqual(self.writes, [])
 
     def test_motion_deadline_handles_tick_wrap(self):
@@ -343,7 +345,8 @@ class RobotExecution(unittest.TestCase):
         self.tick = 0xFFFFFFF0
         self.assertEqual(self.call("prvAdvanceAction", 0, self.transaction, self.done), -3)
         self.tick = 100
-        self.assertEqual(self.call("prvAdvanceAction", 0, self.transaction, self.done), -4)
+        self.assertEqual(self.call("prvAdvanceAction", 0, self.transaction, self.done), -3)
+        self.assertEqual(self.get("ucOverdue", 1), 1)
 
     def test_five_prepare_retries_have_three_second_spacing(self):
         self.put("ucCommandWriteAttempted", 0, 1)
@@ -362,6 +365,30 @@ class RobotExecution(unittest.TestCase):
         self.assertEqual(self.call("prvSchedulePrepareRetry", self.transaction,
                                   0xFFFFFFFA), -6)
         self.assertEqual(self.get("ucPrepareRetryCount", 1), 0)
+
+    def test_normal_order_does_not_send_standalone_home(self):
+        workflow = (ROOT / "Application/UserAPP/Coffee3CloseApp/WorkFlow/"
+                    "coffee3_workflow.c").read_text(encoding="utf-8")
+        start = workflow.rindex("static int32_t prvRunOrder(")
+        end = workflow.index("static int32_t prvConfirmIceCup", start)
+        body = workflow[start:end]
+
+        self.assertIn("COFFEE3_ACTION_ROBOT_PUT_STORAGE", body)
+        self.assertIn("COFFEE3_ACTION_ROBOT_PUT_OUTPUT", body)
+        self.assertNotIn("COFFEE3_ACTION_ROBOT_HOME", body)
+        self.assertNotIn("prvRunStep(30U, COFFEE3_DEVICE_ROBOT", body)
+        self.assertNotIn("prvRunStep(190U, COFFEE3_DEVICE_ROBOT", body)
+
+    def test_standalone_pickup_does_not_append_home(self):
+        workflow = (ROOT / "Application/UserAPP/Coffee3CloseApp/WorkFlow/"
+                    "coffee3_workflow.c").read_text(encoding="utf-8")
+        start = workflow.rindex("static int32_t prvRunStoragePickup(")
+        body = workflow[start:]
+
+        self.assertIn("COFFEE3_ACTION_ROBOT_TAKE_STORAGE", body)
+        self.assertIn("COFFEE3_ACTION_ROBOT_PUT_OUTPUT", body)
+        self.assertNotIn("COFFEE3_ACTION_ROBOT_HOME", body)
+        self.assertNotIn("prvRunStep(820U, COFFEE3_DEVICE_ROBOT", body)
 
 
 if __name__ == "__main__":

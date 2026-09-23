@@ -43,8 +43,6 @@ typedef struct {
 	uint8_t aucPollIndex[COFFEE3_DEVICE_COUNT];
 	uint8_t ucPollCount;
 	uint8_t ucPollCursor;
-	uint8_t ucPollingActive;
-	volatile uint8_t ucPreemptRequested;
 	uint8_t ucCreated;
 } Coffee3RtuBusContext_t;
 
@@ -70,6 +68,8 @@ static Coffee3RtuBusContext_t
 
 /** @brief Allocate one Modbus context only for each selected RTU bus. */
 static ModbusPort_t s_axModbusPorts[COFFEE3_MODBUS_BUS_COUNT];
+static uint16_t s_usM50LastState;
+static uint8_t s_ucM50StateKnown;
 
 /**
   * @brief  将一个 CubeMX UART 句柄重新初始化为 8-N-1。
@@ -130,9 +130,11 @@ static void prvLogCommandFailure(const Coffee3RtuBusConfig_t *pxConfig,
 static void prvLogIoWriteExpected(const Coffee3Command_t *pxCommand);
 static void prvLogIoWrite(const Coffee3Command_t *pxCommand,
 	ModbusPortResult_e xResult, const IoModuleModbusDigitalImage_t *pxImage);
+static void prvM50StatusCallback(const CoffeeMachineM50Image_t *pxImage,
+	ModbusPortResult_e xResult, uint8_t ucConsecutiveMisses,
+	const void *pvContext);
 static uint8_t prvCommandCanceled(const void *pvContext);
 static const char *prvModbusResultName(ModbusPortResult_e xResult);
-static uint8_t prvPollPreempted(void *pvContext);
 static void prvInitializePollSchedule(Coffee3RtuBusContext_t *pxContext,
 	uint8_t ucBusId);
 static BaseType_t prvTryBackgroundPoll(Coffee3RtuBusContext_t *pxContext,
@@ -210,17 +212,6 @@ const Coffee3RtuBusConfig_t *pxCoffee3RtuBusGetConfig(uint8_t ucIndex)
 }
 
 /*-----------------------------------------------------------*/
-void vCoffee3RtuBusRequestPreempt(uint8_t ucBusId)
-{
-	uint8_t ucIndex;
-
-	ucIndex = prvFindBusIndex(ucBusId);
-	if (ucIndex < COFFEE3_RTU_BUS_COUNT) {
-		s_axBusContexts[ucIndex].ucPreemptRequested = 1U;
-	}
-}
-
-/*-----------------------------------------------------------*/
 static void prvInitializePollSchedule(Coffee3RtuBusContext_t *pxContext,
 	uint8_t ucBusId)
 {
@@ -272,17 +263,6 @@ static void prvInitializePollSchedule(Coffee3RtuBusContext_t *pxContext,
 }
 
 /*-----------------------------------------------------------*/
-static uint8_t prvPollPreempted(void *pvContext)
-{
-	Coffee3RtuBusContext_t *pxContext;
-
-	pxContext = (Coffee3RtuBusContext_t *)pvContext;
-	return ((pxContext != NULL) &&
-		(pxContext->ucPreemptRequested != 0U) &&
-		(pxContext->ucPollingActive != 0U)) ? 1U : 0U;
-}
-
-/*-----------------------------------------------------------*/
 static BaseType_t prvTryBackgroundPoll(Coffee3RtuBusContext_t *pxContext,
 	const Coffee3RtuBusConfig_t *pxConfig, Coffee3RtuBusStatus_t *pxStatus)
 {
@@ -327,32 +307,10 @@ static BaseType_t prvTryBackgroundPoll(Coffee3RtuBusContext_t *pxContext,
 	xCommand.usAction = (uint16_t)COFFEE3_ACTION_REFRESH;
 	xCommand.ulTimeoutMs = (pxConfig->ucBusId == 5U) ?
 		COFFEE3_RTU_POLL_TIMEOUT_MS : COFFEE3_RTU_IO_TIMEOUT_MS;
-	pxContext->ucPollingActive = 1U;
-	pxContext->ucPreemptRequested = 0U;
 	pxStatus->ucActiveDevice = (uint8_t)xDeviceId;
 	vCoffee3DeviceCommandStarted(&xCommand);
 	xResult = prvExecute(pxContext,
 		pxCoffee3DeviceGetBinding(xDeviceId), &xCommand);
-	pxContext->ucPollingActive = 0U;
-	if (xResult == MODBUS_PORT_RESULT_PREEMPTED) {
-		(void)xTransportControl(&pxContext->xChannel,
-			TRANSPORT_CTRL_RX_FLUSH, NULL);
-		/* The request was sacrificed; keep the cursor on this device and
-		 * retry it after the foreground queue has drained. */
-		pxContext->ucPollCursor = ucIndex;
-		pxContext->axNextPollTick[xDeviceId] = xTaskGetTickCount() +
-			pdMS_TO_TICKS(1U);
-		vCoffee3DeviceCommandCompleted(&xCommand,
-			MODBUS_PORT_RESULT_PREEMPTED, 0U);
-		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
-			prvGetDeviceLogSource((uint8_t)xDeviceId),
-			COFFEE3_LOG_ORDER_SYSTEM,
-			"Status poll paused: id=%u reason=foreground command result=%d",
-			(unsigned int)pxCoffee3DeviceGetBinding(xDeviceId)->ucUnitId,
-			(int)xResult);
-		pxStatus->ucActiveDevice = 0U;
-		return pdTRUE;
-	}
 	prvPublishPollHealth(pxContext, pxConfig, &xCommand, xResult);
 	vCoffee3DeviceCommandCompleted(&xCommand, (int32_t)xResult,
 		(xResult == MODBUS_PORT_RESULT_TIMEOUT) ? 1U : 0U);
@@ -396,6 +354,11 @@ static void prvPublishPollHealth(Coffee3RtuBusContext_t *pxContext,
 		pxContext->aucPollMisses[xDeviceId] = 0U;
 		vCoffee3DeviceSetOnline(xDeviceId, 1U);
 		ucReady = (xResult == MODBUS_PORT_RESULT_OK) ? 1U : 0U;
+		if ((xResult == MODBUS_PORT_RESULT_OK) &&
+			(xDeviceId == COFFEE3_DEVICE_COFFEE_MACHINE)) {
+			ucReady = (g_xCoffee3CoffeeMachineImage.ausStatus[0U] ==
+				g_xCoffeeMachineM50Config.usIdleValue) ? 1U : 0U;
+		}
 		if ((xResult == MODBUS_PORT_RESULT_OK) &&
 			(xDeviceId == COFFEE3_DEVICE_ICE_MACHINE)) {
 			ucFaultMask = ucIceMachineGetFaultMask(&g_xCoffee3IceImage);
@@ -529,8 +492,6 @@ void vCoffee3RtuBusTask(void *pvArgument)
 		if (xResult == MODBUS_PORT_RESULT_OK) {
 			pxContext->ucCreated = 1U;
 			prvInitializePollSchedule(pxContext, pxConfig->ucBusId);
-			vModbusPortSetPreemptCheck(pxContext->pxPort,
-				prvPollPreempted, pxContext);
 			pxStatus->ulCurrentBaudRate =
 				pxConfig->ulDefaultBaudRate;
 			pxStatus->ucReady = 1U;
@@ -691,12 +652,8 @@ static ModbusPortResult_e prvExecute(Coffee3RtuBusContext_t *pxContext,
 		xResult = xCoffeeMachineM50Execute(&g_xCoffeeMachineM50Config,
 			pxContext->pxPort, pxBinding->ucUnitId, xM50Action,
 			pxCommand->ausParameter[0], pxCommand->ulTimeoutMs, &xM50Image,
+			prvM50StatusCallback, pxCommand,
 			prvCommandCanceled, pxCommand);
-		if ((xResult == MODBUS_PORT_RESULT_OK) &&
-			((xM50Action == COFFEE_MACHINE_M50_ACTION_REFRESH) ||
-			 (xM50Action == COFFEE_MACHINE_M50_ACTION_MAKE))) {
-			vCoffee3DeviceImageCommitM50(&xM50Image);
-		}
 		return xResult;
 
 	case COFFEE3_DEVICE_CUP_MACHINE:
@@ -931,7 +888,7 @@ static const char *prvGetBusLinkEvent(uint8_t ucBusId)
 {
 	switch (ucBusId) {
 	case 2U:
-		return "DEVICE_LINK:BUS2_115200";
+		return "DEVICE_LINK:BUS2_19200";
 	case 3U:
 		return "DEVICE_LINK:BUS3_9600";
 	case 4U:
@@ -1009,13 +966,62 @@ static uint8_t prvFindModbusPortIndex(uint8_t ucBusIndex)
 static const char *prvModbusResultName(ModbusPortResult_e xResult)
 {
 	switch (xResult) {
-	case MODBUS_PORT_RESULT_TIMEOUT: return "TIMEOUT";
-	case MODBUS_PORT_RESULT_PROTOCOL: return "PROTOCOL";
-	case MODBUS_PORT_RESULT_BUSY: return "BUSY";
-	case MODBUS_PORT_RESULT_CANCELED: return "CANCELED";
-	case MODBUS_PORT_RESULT_PREEMPTED: return "PREEMPTED";
-	default: return "OTHER";
+	case MODBUS_PORT_RESULT_NOT_READY: return "not ready";
+	case MODBUS_PORT_RESULT_BUSY: return "busy";
+	case MODBUS_PORT_RESULT_TIMEOUT: return "timeout";
+	case MODBUS_PORT_RESULT_TRANSPORT: return "transport";
+	case MODBUS_PORT_RESULT_PROTOCOL: return "protocol";
+	case MODBUS_PORT_RESULT_EXCEPTION: return "exception";
+	case MODBUS_PORT_RESULT_CANCELED: return "canceled";
+	case MODBUS_PORT_RESULT_PREEMPTED: return "preempted";
+	default: return "other";
 	}
+}
+
+/*-----------------------------------------------------------*/
+static void prvM50StatusCallback(const CoffeeMachineM50Image_t *pxImage,
+	ModbusPortResult_e xResult, uint8_t ucConsecutiveMisses,
+	const void *pvContext)
+{
+	const Coffee3Command_t *pxCommand;
+	const Coffee3DeviceBinding_t *pxBinding;
+	uint16_t usState;
+
+	pxCommand = (const Coffee3Command_t *)pvContext;
+	pxBinding = pxCoffee3DeviceGetBinding(COFFEE3_DEVICE_COFFEE_MACHINE);
+	if ((pxImage == NULL) || (pxCommand == NULL) || (pxBinding == NULL)) {
+		return;
+	}
+	if (xResult != MODBUS_PORT_RESULT_OK) {
+		vCoffee3DeviceSetReady(COFFEE3_DEVICE_COFFEE_MACHINE, 0U);
+		if ((ucConsecutiveMisses == 1U) ||
+			(ucConsecutiveMisses == COFFEE_MACHINE_M50_POLL_MISS_LIMIT)) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				prvGetDeviceLogSource((uint8_t)COFFEE3_DEVICE_COFFEE_MACHINE),
+				(uint16_t)pxCommand->ulOrderId,
+				"Coffee status missed: device=%s miss=%u/%u reason=%s result=%d",
+				pxBinding->pcName, (unsigned int)ucConsecutiveMisses,
+				(unsigned int)COFFEE_MACHINE_M50_POLL_MISS_LIMIT,
+				prvModbusResultName(xResult), (int)xResult);
+		}
+		return;
+	}
+	usState = pxImage->ausStatus[0U];
+	vCoffee3DeviceImageCommitM50(pxImage);
+	vCoffee3DeviceSetReady(COFFEE3_DEVICE_COFFEE_MACHINE,
+		(usState == g_xCoffeeMachineM50Config.usIdleValue) ? 1U : 0U);
+	if ((s_ucM50StateKnown == 0U) || (s_usM50LastState != usState)) {
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			prvGetDeviceLogSource((uint8_t)COFFEE3_DEVICE_COFFEE_MACHINE),
+			(uint16_t)pxCommand->ulOrderId,
+			"Coffee state changed: device=%s state=%s status=%u action=%s",
+			pxBinding->pcName,
+			(usState == g_xCoffeeMachineM50Config.usIdleValue) ?
+				"idle" : "working",
+			(unsigned int)usState, prvActionName(pxCommand->usAction));
+	}
+	s_usM50LastState = usState;
+	s_ucM50StateKnown = 1U;
 }
 
 /*-----------------------------------------------------------*/
@@ -1049,9 +1055,7 @@ static void prvLogCommandFailure(const Coffee3RtuBusConfig_t *pxConfig,
 	const Coffee3DeviceBinding_t *pxBinding;
 
 	if ((pxConfig == NULL) || (pxCommand == NULL) ||
-		(pxCommand->ucDeviceId >= (uint8_t)COFFEE3_DEVICE_COUNT) ||
-		(g_axCoffee3DeviceStatus[pxCommand->ucDeviceId].lLastResult ==
-			(int32_t)xResult)) {
+		(pxCommand->ucDeviceId >= (uint8_t)COFFEE3_DEVICE_COUNT)) {
 		return;
 	}
 	pxBinding = pxCoffee3DeviceGetBinding(
@@ -1059,13 +1063,10 @@ static void prvLogCommandFailure(const Coffee3RtuBusConfig_t *pxConfig,
 	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 		prvGetDeviceLogSource(pxCommand->ucDeviceId),
 		(uint16_t)pxCommand->ulOrderId,
-		"Action failed: action=%s reason=%s id=%u result=%d code=%u step=%u",
+		"Action failed: device=%s action=%s reason=%s result=%d step=%u",
+		(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
 		prvActionName(pxCommand->usAction), prvModbusResultName(xResult),
-		(pxBinding != NULL) ? (unsigned int)pxBinding->ucUnitId : 0U,
 		(int)xResult,
-		(unsigned int)pxCommand->ucDeviceId,
-		(unsigned int)pxCommand->usAction,
-		(unsigned int)pxCommand->ucSource,
 		(unsigned int)pxCommand->usStepId);
 }
 

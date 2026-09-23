@@ -789,7 +789,7 @@ flowchart LR
     PORT --> CH
 ```
 
-所以 nanoMODBUS 最终获得了一条通向 Transport 的路。
+⚠所以 nanoMODBUS 最终获得了一条通向 Transport 的路。
 
 ------
 
@@ -1522,7 +1522,7 @@ xTransportControl(
 ```text
 8N1
 =
-1 start
+  1 start
 + 8 data
 + 1 stop
 =
@@ -1616,7 +1616,7 @@ CANCELED
 # 39. Error Mapping 主图
 
 ```mermaid
-flowchart TB
+flowchart LR
 
     NM["nmbs_error"]
 
@@ -1827,8 +1827,6 @@ Sequence
 usLength
 usCapturedLength
 ```
-
-？
 
 因为：
 
@@ -2107,7 +2105,7 @@ flowchart TB
 
     API["xModbusPortServerPoll"]
 
-    CHECK["检查 Initialized / Server / Timeout"]
+    CHECK["检查 Initialized / Server / Timeout "]
 
     DEADLINE["建立 Poll Deadline"]
 
@@ -2450,7 +2448,9 @@ Single owner workflow
 
 # 第十五主干：从设计模式角度重新看 ModbusPort
 
-# 63. Adapter Pattern
+# 63. Adapter Pattern 适配器模式
+
+通过一层转换，把不兼容的接口变成调用方期望的接口，实现复用和解耦
 
 最直接：
 
@@ -2464,7 +2464,9 @@ Transport interface
 
 ------
 
-# 64. Facade Pattern
+# 64. Facade Pattern 外观模式
+
+简化接口，降低调用方与内部实现之间的耦
 
 上层只看到：
 
@@ -2485,7 +2487,9 @@ destination address setup
 
 ------
 
-# 65. Dependency Inversion
+# 65. Dependency Inversion 依赖倒置
+
+高层和低层都依赖抽象，而不是高层直接依赖低层
 
 ModbusPort 不直接依赖：
 
@@ -2512,7 +2516,9 @@ ModbusPort不需要理解新硬件。
 
 ------
 
-# 66. Anti-Corruption Layer
+# 66. Anti-Corruption Layer  防腐层
+
+在系统边界加一层隔离和转换，防止外部或旧系统的模型、术语、错误码污染内部干净设计
 
 这是很适合形容 Error Mapping 的一个概念。
 
@@ -2540,6 +2546,8 @@ ModbusPort 阻止第三方错误域一路渗透上层。
 
 # 67. Transaction Script / Template
 
+把公共流程抽成模板，只留变化步骤，减少重复，结构统一
+
 每个 Client API 都遵循：
 
 ```text
@@ -2558,6 +2566,7 @@ Finish
 
 # 68. Observability Boundary
 
+表示系统中可被观测、可被采集数据的范围分界，用于明确哪些部分对外暴露日志、指标和追踪信息。
 ```text
 Trace
 Fault
@@ -2569,9 +2578,13 @@ Protocol Code
 
 协议库不需要懂项目日志系统，上层也不必直接知道 HAL error。
 
+
+
 ------
 
 # 69. Data Adapter
+
+在不同数据格式或数据源之间做转换，让上层逻辑使用统一的数据模型，不关心底层差异
 
 例如：
 
@@ -2667,7 +2680,7 @@ ModbusPort
 # 72. 最终总脑图
 
 ```mermaid
-flowchart TB
+flowchart LR
 
     MP["ModbusPort<br/>项目Modbus事务边界"]
 

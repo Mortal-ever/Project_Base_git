@@ -194,7 +194,7 @@ ModbusPortResult_e xModbusPortServerPoll(ModbusPort_t *pxPort,
 	uint32_t ulPollTimeoutMs)
 {
 	nmbs_error xError;
-
+	/* 参数检查：端口必须初始化且角色为 Server，超时参数必须在合理范围。 */
 	if ((pxPort == NULL) || (pxPort->ucInitialized == 0U) ||
 		(pxPort->xRole != MODBUS_PORT_ROLE_SERVER) ||
 		(ulPollTimeoutMs == 0U) ||
@@ -1522,8 +1522,7 @@ static void prvUpdateFaultDetail(ModbusPort_t *pxPort,
 	/* Fault 是 ModbusPort 内嵌对象，每次事务结束时覆盖为新的完整快照。 */
 	memset(&pxPort->xLastFault, 0, sizeof(pxPort->xLastFault));
 	pxPort->xLastFault.xResult = xResult;
-	pxPort->xLastFault.xTransportResult =
-		pxPort->xLastTransportResult;
+	pxPort->xLastFault.xTransportResult = pxPort->xLastTransportResult;
 	pxPort->xLastFault.lProtocolCode = (int32_t)xError;
 	if (nmbs_error_is_exception(xError)) {
 		pxPort->xLastFault.ucExceptionCode = (uint8_t)xError;
@@ -1531,7 +1530,6 @@ static void prvUpdateFaultDetail(ModbusPort_t *pxPort,
 	if ((pxPort->xLastTransportResult != TRANSPORT_RESULT_OK) &&
 		(xTransportGetStatus(pxPort->pxChannel, &xStatus) ==
 		TRANSPORT_RESULT_OK)) {
-		pxPort->xLastFault.lNativeError =
-			xStatus.xLastFault.lNativeError;
+		pxPort->xLastFault.lNativeError = xStatus.xLastFault.lNativeError;
 	}
 }

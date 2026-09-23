@@ -1340,6 +1340,8 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 	uint16_t usQuantity)
 {
 	uint32_t ulEndAddress;
+	uint16_t usStorage;
+	uint16_t usOutput;
 	uint16_t usValue;
 	uint8_t ucAccepted;
 
@@ -1353,15 +1355,39 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 		s_ausCommandRegisters[COFFEE3_REG_PICKUP_CONFIRM] = 0U;
 	}
 	if ((usAddress <= COFFEE3_REG_ONLINE_OUTPUT) &&
-		(ulEndAddress > COFFEE3_REG_STORAGE_PICKUP) &&
-		(s_ausCommandRegisters[COFFEE3_REG_ONLINE_OUTPUT] == 1U) &&
-		(s_ausCommandRegisters[COFFEE3_REG_STORAGE_PICKUP] != 0U)) {
-		usValue = s_ausCommandRegisters[COFFEE3_REG_STORAGE_PICKUP];
-		if (xCoffee3WorkflowSubmitStoragePickup(usValue) != pdPASS) {
-			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
-				"Pickup rejected: slot=%u busy or invalid",
-				(unsigned int)usValue);
+		(ulEndAddress > COFFEE3_REG_STORAGE_PICKUP)) {
+		usStorage = s_ausCommandRegisters[COFFEE3_REG_STORAGE_PICKUP];
+		usOutput = s_ausCommandRegisters[COFFEE3_REG_ONLINE_OUTPUT];
+		/* The host may write 0x0009 and 0x000A separately. Evaluate only
+		 * after both halves of the pickup request are present. */
+		if ((usStorage != 0U) && (usOutput != 0U)) {
+			if (s_ausCommandRegisters[COFFEE3_REG_ORDER_PRESENT] != 0U) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
+					"Pickup rejected: storage=%u outlet=%u reason=order active",
+					(unsigned int)usStorage, (unsigned int)usOutput);
+			} else if ((usStorage < 1U) || (usStorage > 2U)) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
+					"Pickup rejected: storage=%u outlet=%u reason=storage unsupported",
+					(unsigned int)usStorage, (unsigned int)usOutput);
+			} else if (usOutput != 1U) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
+					"Pickup rejected: storage=%u outlet=%u reason=outlet unsupported",
+					(unsigned int)usStorage, (unsigned int)usOutput);
+			} else if (xCoffee3WorkflowSubmitStoragePickup(usStorage,
+				usOutput) != pdPASS) {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
+					"Pickup rejected: storage=%u outlet=%u reason=workflow busy",
+					(unsigned int)usStorage, (unsigned int)usOutput);
+			} else {
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+					COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_SYSTEM,
+					"Pickup accepted: storage=%u outlet=%u",
+					(unsigned int)usStorage, (unsigned int)usOutput);
+			}
 		}
 	}
 	if ((usAddress <= COFFEE3_REG_CANCEL_ORDER) &&
@@ -1770,11 +1796,15 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	uint16_t usParameter1)
 {
 	Coffee3Command_t xCommand;
+	const Coffee3DeviceBinding_t *pxBinding;
+	const char *pcDeviceName;
 	uint8_t ucDebug;
 
 	/* Robot body controls need TCP only; custom-program actions need READY.
 	 * Other device debug retains its existing online/ready boundary. */
 	ucDebug = 1U;
+	pxBinding = pxCoffee3DeviceGetBinding(xDeviceId);
+	pcDeviceName = (pxBinding != NULL) ? pxBinding->pcName : "Unknown";
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
 		(xDeviceId >= COFFEE3_DEVICE_COUNT) ||
 		(((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
@@ -1783,10 +1813,10 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 		 (g_xCoffee3RobotTcpStatus.ucConnected == 0U) :
 		 ((g_axCoffee3DeviceStatus[xDeviceId].ucOnline == 0U) ||
 		  (g_axCoffee3DeviceStatus[xDeviceId].ucReady == 0U)))) {
-		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			"DEBUG_COMMAND_REJECTED_DEVICE_NOT_READY", -4,
-			"device", (int32_t)xDeviceId);
+			"Debug rejected: device=%s action=%u reason=not ready result=-4",
+			pcDeviceName, (unsigned int)xAction);
 		return 0U;
 	}
 	memset(&xCommand, 0, sizeof(xCommand));
@@ -1798,6 +1828,9 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	xCommand.ausParameter[1] = usParameter1;
 	xCommand.ulTimeoutMs = COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS;
 	xCommand.ucRetryLimit = 1U;
+	if (xAction == COFFEE3_ACTION_COFFEE_MAKE) {
+		xCommand.ulTimeoutMs = COFFEE3_COFFEE_ACTION_TIMEOUT_MS;
+	}
 	if (ucDebug != 0U) {
 		xCommand.ucFlags |= COFFEE3_COMMAND_FLAG_DEBUG;
 	}
@@ -1806,23 +1839,16 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 		xCommand.ucRetryLimit = 0U;
 	}
 	if (xCoffee3CommandSubmitUrgent(&xCommand, pdMS_TO_TICKS(100U)) != pdPASS) {
-		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-			((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-			 (xAction > COFFEE3_ACTION_ROBOT_MANUAL_MODE) &&
-			 (xAction != COFFEE3_ACTION_REFRESH)) ?
-				"Robot debug rejected: pending slot busy or admission gate closed" :
-				"DEBUG_COMMAND_QUEUE_FULL: command not enqueued",
-			-1, "action", (int32_t)xAction);
+			"Debug rejected: device=%s action=%u reason=admission closed result=-1",
+			pcDeviceName, (unsigned int)xAction);
 		return 0U;
 	}
-	(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 		COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
-		((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-		 (xAction > COFFEE3_ACTION_ROBOT_MANUAL_MODE)) ?
-			"Robot debug queued; wait for order/pickup business release" :
-			"MANUAL_COMMAND_ACCEPTED",
-		0, "action", (int32_t)xAction);
+		"Debug accepted: device=%s action=%u",
+		pcDeviceName, (unsigned int)xAction);
 	return 1U;
 }
 
@@ -2171,7 +2197,11 @@ static void prvRefreshStatusRegisters(void)
 		g_xCoffee3WorkflowStatus.aucFruitState[1];
 	s_ausStatusRegisters[0x000BU] = g_xCoffee3WorkflowStatus.ausOutputState[0];
 	s_ausStatusRegisters[0x000CU] = 0U;
-	s_ausStatusRegisters[0x0027U] = (uint16_t)(usInputIoBitmap & 0x0003U);
+	/* 0x1027 is the live storage occupancy mask. Match Coffee1 semantics:
+	 * a bit is visible only when the physical cup input is active and the
+	 * corresponding storage is enabled by persistent configuration 0x001A. */
+	s_ausStatusRegisters[0x0027U] = (uint16_t)(usInputIoBitmap &
+		usCoffee3ConfigStorageMask() & COFFEE3_STORAGE_INSTALLED_MASK);
 	s_ausStatusRegisters[0x001AU] = usEnergyInteger;
 	s_ausStatusRegisters[0x001BU] = usEnergyFraction;
 	s_ausStatusRegisters[0x0023U] = (uint16_t)((usInputIoBitmap >> 2U) & 1U);

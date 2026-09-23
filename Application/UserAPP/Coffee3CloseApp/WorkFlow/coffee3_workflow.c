@@ -104,6 +104,15 @@ static uint8_t s_ucOtaReserved;
 static uint8_t s_ucMaintenanceActive;
 static uint8_t s_ucPickupPending;
 static uint8_t s_ucStoragePickupPending;
+/* Storage pickup is concurrent with non-Robot work, but Robot ownership is
+ * always exclusive. Active covers TAKE_STORAGE..PUT_OUTPUT; confirm covers
+ * the asynchronous X3/source-sensor and outlet-door continuation. */
+static uint8_t s_ucStoragePickupActive;
+static uint8_t s_ucStoragePickupConfirmStorage;
+static uint16_t s_usStoragePickupConfirmOrderId;
+static uint16_t s_usDetachedPickupLogOrder;
+static TickType_t s_xStoragePickupConfirmStart;
+static uint8_t s_ucStoragePickupConfirmOverdueLogged;
 static uint16_t s_ausStoredOrderId[2];
 static uint8_t s_ucWaterAlarm;
 static uint8_t s_ucCoffeeFillActive;
@@ -252,9 +261,16 @@ static uint8_t prvQueuePendingOrder(void);
 static uint8_t prvRobotPositionAction(Coffee3Action_e xAction);
 static void prvServicePickup(void);
 static void prvPublishOutput(uint16_t usOutput, uint16_t usState);
+static void prvPublishOutputForOrder(uint16_t usOutput, uint16_t usState,
+	uint16_t usOrderId);
 static int32_t prvCheckOutputEmpty(uint16_t usOutput);
+static int32_t prvWaitOutputAvailableForOrder(void);
 static int32_t prvSelectStorage(void);
 static int32_t prvRunStoragePickup(uint16_t usStorage);
+static int32_t prvTryRunInterleavedStoragePickup(void);
+static uint16_t prvStorageStatusMask(const Coffee3IoState_t *pxIo);
+static void prvRejectStoragePickup(uint16_t usStorage,
+	const char *pcReason, uint16_t usStatusMask);
 static int32_t prvWaitM50Clean(void);
 static uint8_t prvIoValid(const Coffee3IoState_t *pxIo);
 static void prvStartDoor(uint8_t ucDirection);
@@ -282,6 +298,8 @@ BaseType_t xCoffee3WorkflowAcquireManual(void)
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_CANCELING) &&
 		(s_ucOutletPhase == 0U) && (s_ucStoragePickupPending == 0U) &&
+		(s_ucStoragePickupActive == 0U) &&
+		(s_ucStoragePickupConfirmStorage == 0U) &&
 		(s_ucMaintenanceActive == 0U) && (s_xMaintenance.ucPending == 0U) &&
 		(s_ucManualIcePending == 0U) &&
 		(s_xHotWater.ucPhase == COFFEE3_HOT_WATER_IDLE) &&
@@ -395,14 +413,17 @@ uint8_t ucCoffee3WorkflowManualDispatchAllowed(void)
 	if ((s_usManualReservations != 0U) &&
 		(s_ucInitializationComplete != 0U) &&
 		(g_xCoffee3WorkflowStatus.ucRecoveryRequired == 0U) &&
-		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_CANCELING) &&
-		(s_ucMaintenanceActive == 0U) && (s_ucStoragePickupPending == 0U) &&
-		(s_xMaintenance.ucPending == 0U) && (s_ucManualIcePending == 0U) &&
 		(s_ucOtaReserved == 0U) &&
-		(s_ucCoffeeFillActive == 0U) &&
-		(s_ucOutletPhase == 0U) &&
-		(s_xHotWater.ucPhase == COFFEE3_HOT_WATER_IDLE)) {
+		(s_ucStoragePickupActive == 0U) &&
+		((g_xCoffee3WorkflowStatus.xState == COFFEE3_WORKFLOW_RUNNING) ||
+		 ((s_ucMaintenanceActive == 0U) &&
+		  (s_ucStoragePickupPending == 0U) &&
+		  (s_xMaintenance.ucPending == 0U) &&
+		  (s_ucManualIcePending == 0U) &&
+		  (s_ucCoffeeFillActive == 0U) &&
+		  (s_ucOutletPhase == 0U) &&
+		  (s_xHotWater.ucPhase == COFFEE3_HOT_WATER_IDLE)))) {
 		ucAllowed = 1U;
 	}
 	taskEXIT_CRITICAL();
@@ -468,6 +489,8 @@ static uint8_t prvMaintenanceIdle(void)
 		(s_xInitHome.ulCommandId == 0U) &&
 		(s_ucMaintenanceActive == 0U) && (s_xMaintenance.ucPending == 0U) &&
 		(s_ucManualIcePending == 0U) && (s_ucStoragePickupPending == 0U) &&
+		(s_ucStoragePickupActive == 0U) &&
+		(s_ucStoragePickupConfirmStorage == 0U) &&
 		(s_usManualReservations == 0U) && (s_ucOtaReserved == 0U) &&
 		(uxQueueMessagesWaiting(s_xOrderQueue) == 0U) &&
 		(g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
@@ -746,6 +769,9 @@ static void prvServicePickup(void)
 	uint8_t ucDoorDebugDirection;
 	uint8_t ucDoorConflict;
 	uint8_t ucDoorTimeout;
+	uint8_t ucConfirmStorage;
+	uint8_t ucSourceCup;
+	uint16_t usConfirmOrderId;
 	const char *pcDoorDirection;
 	const char *pcPreviousDoorDirection;
 	const char *pcDoorFailure;
@@ -887,6 +913,44 @@ static void prvServicePickup(void)
 			(void)ucCoffee3IoSetLocalOutput((uint8_t)(s_ucDoorDirection - 1U), 1U);
 		}
 	}
+	ucConfirmStorage = s_ucStoragePickupConfirmStorage;
+	if ((ucConfirmStorage >= 1U) && (ucConfirmStorage <= 2U) &&
+		(prvIoValid(&xIo) != 0U)) {
+		ucCup = xIo.xInput.aucMB1XPin[COFFEE3_EXTERNAL_DI_OUTLET_CUP];
+		ucSourceCup = xIo.xInput.aucMB1XPin[ucConfirmStorage - 1U];
+		if ((ucCup != 0U) && (ucSourceCup == 0U) &&
+			(s_ucDoorFault == 0U) && (s_ucDoorDirection == 0U)) {
+			usConfirmOrderId = s_usStoragePickupConfirmOrderId;
+			taskENTER_CRITICAL();
+			s_ucStoragePickupConfirmStorage = 0U;
+			s_usStoragePickupConfirmOrderId = 0U;
+			s_ucStoragePickupConfirmOverdueLogged = 0U;
+			s_ausStoredOrderId[ucConfirmStorage - 1U] = 0U;
+			s_ucOutletPhase = 1U;
+			s_ucPickupPending = 0U;
+			s_ucEmptyTiming = 0U;
+			taskEXIT_CRITICAL();
+			prvPublishOutputForOrder(1U, 5U, usConfirmOrderId);
+			prvStartDoor(2U);
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				(usConfirmOrderId != 0U) ? usConfirmOrderId :
+					COFFEE3_LOG_ORDER_SYSTEM,
+				"Pickup placement confirmed: device=IoInput storage=%u X3=1 source=0; open outlet",
+				(unsigned int)ucConfirmStorage);
+		} else if ((s_ucStoragePickupConfirmOverdueLogged == 0U) &&
+			((xNow - s_xStoragePickupConfirmStart) >=
+			 pdMS_TO_TICKS(COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS))) {
+			s_ucStoragePickupConfirmOverdueLogged = 1U;
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				(s_usStoragePickupConfirmOrderId != 0U) ?
+					s_usStoragePickupConfirmOrderId : COFFEE3_LOG_ORDER_SYSTEM,
+				"Pickup confirmation overdue: device=IoInput storage=%u X3=%u source=%u; waiting",
+				(unsigned int)ucConfirmStorage, (unsigned int)ucCup,
+				(unsigned int)ucSourceCup);
+		}
+	}
 	if ((s_ucOutletPhase == 0U) || (s_ucDoorFault != 0U)) {
 		return;
 	}
@@ -932,11 +996,19 @@ static void prvServicePickup(void)
 /*-----------------------------------------------------------*/
 static void prvPublishOutput(uint16_t usOutput, uint16_t usState)
 {
+	prvPublishOutputForOrder(usOutput, usState,
+		g_xCoffee3WorkflowStatus.usCurrentOrderId);
+}
+
+/*-----------------------------------------------------------*/
+static void prvPublishOutputForOrder(uint16_t usOutput, uint16_t usState,
+	uint16_t usOrderId)
+{
 	taskENTER_CRITICAL();
 	g_xCoffee3WorkflowStatus.ausOutputState[usOutput - 1U] = usState;
 	if (usState == 2U) {
 		g_xCoffee3WorkflowStatus.ausOutputOrderId[usOutput - 1U] =
-			g_xCoffee3WorkflowStatus.usCurrentOrderId;
+			usOrderId;
 	}
 	taskEXIT_CRITICAL();
 	vCoffee3ServerPublishOutput(usOutput, usState);
@@ -950,6 +1022,7 @@ static int32_t prvCheckOutputEmpty(uint16_t usOutput)
 
 	prvServicePickup();
 	if ((usOutput != 1U) || (s_ucOutletPhase != 0U) ||
+		(s_ucStoragePickupConfirmStorage != 0U) ||
 		(s_ucDoorFault != 0U) || (s_ucDoorDirection != 0U)) {
 		return COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED;
 	}
@@ -961,6 +1034,46 @@ static int32_t prvCheckOutputEmpty(uint16_t usOutput)
 	return ((xIo.xInput.aucMB1XPin[COFFEE3_EXTERNAL_DI_OUTLET_CUP] != 0U) ||
 		(xIo.xInput.aucXPin[COFFEE3_LOCAL_DI_DOOR_UPPER] == 0U)) ?
 		COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED : 0;
+}
+
+/*-----------------------------------------------------------*/
+static int32_t prvWaitOutputAvailableForOrder(void)
+{
+	Coffee3IoState_t xIo;
+	TickType_t xStart;
+	uint8_t ucOverdueLogged;
+
+	xStart = xTaskGetTickCount();
+	ucOverdueLogged = 0U;
+	for (;;) {
+		if (g_xCoffee3WorkflowStatus.ucCancelRequested != 0U) {
+			return COFFEE3_WORKFLOW_ERROR_CANCELED;
+		}
+		prvServicePickup();
+		vCoffee3IoGetSnapshot(&xIo);
+		if ((prvIoValid(&xIo) != 0U) &&
+			(s_ucOutletPhase == 0U) &&
+			(s_ucStoragePickupActive == 0U) &&
+			(s_ucStoragePickupConfirmStorage == 0U) &&
+			(s_ucDoorFault == 0U) && (s_ucDoorDirection == 0U) &&
+			(xIo.xInput.aucMB1XPin[COFFEE3_EXTERNAL_DI_OUTLET_CUP] == 0U) &&
+			(xIo.xInput.aucXPin[COFFEE3_LOCAL_DI_DOOR_UPPER] != 0U)) {
+			return 0;
+		}
+		if ((ucOverdueLogged == 0U) &&
+			((xTaskGetTickCount() - xStart) >=
+			 pdMS_TO_TICKS(COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS))) {
+			ucOverdueLogged = 1U;
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Outlet wait overdue: device=IoInput X3=%u phase=%u; waiting for pickup release",
+				(unsigned int)xIo.xInput.aucMB1XPin[
+					COFFEE3_EXTERNAL_DI_OUTLET_CUP],
+				(unsigned int)s_ucOutletPhase);
+		}
+		prvDelayWithServices(100U);
+	}
 }
 
 static int32_t prvSelectStorage(void)
@@ -1000,6 +1113,12 @@ BaseType_t xCoffee3WorkflowInitialize(void)
 	s_ucMaintenanceActive = 0U;
 	s_ucPickupPending = 0U;
 	s_ucStoragePickupPending = 0U;
+	s_ucStoragePickupActive = 0U;
+	s_ucStoragePickupConfirmStorage = 0U;
+	s_usStoragePickupConfirmOrderId = 0U;
+	s_usDetachedPickupLogOrder = 0U;
+	s_xStoragePickupConfirmStart = 0U;
+	s_ucStoragePickupConfirmOverdueLogged = 0U;
 	memset(s_ausStoredOrderId, 0, sizeof(s_ausStoredOrderId));
 	s_ucWaterAlarm = 0U;
 	s_ucOutletPhase = 0U;
@@ -1157,21 +1276,34 @@ BaseType_t xCoffee3WorkflowSubmitOrder(const Coffee3Order_t *pxOrder)
 	return xResult;
 }
 
-BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage)
+BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage,
+	uint16_t usOutput)
 {
-	if ((usStorage < 1U) || (usStorage > 2U)) {
+	if ((usStorage < 1U) || (usStorage > 2U) || (usOutput != 1U) ||
+		((usCoffee3ConfigStorageMask() &
+		 (uint16_t)(1U << (usStorage - 1U))) == 0U)) {
 		return pdFAIL;
 	}
 	taskENTER_CRITICAL();
-	if ((g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen == 0U) ||
+	if ((s_ucInitializationComplete == 0U) ||
+		((g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) &&
+		 (g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen == 0U)) ||
+		(g_xCoffee3WorkflowStatus.xState == COFFEE3_WORKFLOW_CANCELING) ||
 		(g_xCoffee3WorkflowStatus.ucRecoveryRequired != 0U) ||
-		(s_ucOutletPhase != 0U) || (s_usManualReservations != 0U) ||
-		(s_ucStoragePickupPending != 0U)) {
+		(s_ucMaintenanceActive != 0U) || (s_xMaintenance.ucPending != 0U) ||
+		(s_ucManualIcePending != 0U) || (s_ucOtaReserved != 0U) ||
+		(s_ucOutletPhase != 0U) || (s_ucDoorDirection != 0U) ||
+		(s_ucDoorFault != 0U) || (s_usManualReservations != 0U) ||
+		(s_ucStoragePickupPending != 0U) ||
+		(s_ucStoragePickupActive != 0U) ||
+		(s_ucStoragePickupConfirmStorage != 0U)) {
 		taskEXIT_CRITICAL();
 		return pdFAIL;
 	}
 	s_ucStoragePickupPending = (uint8_t)usStorage;
-	g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
+	if (g_xCoffee3WorkflowStatus.xState != COFFEE3_WORKFLOW_RUNNING) {
+		g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 0U;
+	}
 	taskEXIT_CRITICAL();
 	return pdPASS;
 }
@@ -1264,9 +1396,16 @@ void vCoffee3WorkflowTask(void *pvArgument)
 		prvServiceHotWater();
 		prvServiceInitialization();
 		taskENTER_CRITICAL();
-		usStoragePickup = s_ucStoragePickupPending;
-		s_ucStoragePickupPending = 0U;
+		usStoragePickup = 0U;
+		if ((s_ucStoragePickupPending != 0U) &&
+			(s_ucOutletPhase == 0U) &&
+			(s_ucStoragePickupConfirmStorage == 0U) &&
+			(s_ucDoorDirection == 0U) && (s_ucDoorFault == 0U)) {
+			usStoragePickup = s_ucStoragePickupPending;
+			s_ucStoragePickupPending = 0U;
+		}
 		if (usStoragePickup != 0U) {
+			s_ucStoragePickupActive = 1U;
 			s_ucMaintenanceActive = 1U;
 		}
 		taskEXIT_CRITICAL();
@@ -1283,6 +1422,7 @@ void vCoffee3WorkflowTask(void *pvArgument)
 					(g_xCoffee3WorkflowStatus.ucPositionUncertain != 0U) ||
 					(g_xCoffee3WorkflowStatus.lSafetyResult != 0);
 			}
+			s_ucStoragePickupActive = 0U;
 			s_ucMaintenanceActive = 0U;
 			g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen =
 				(g_xCoffee3WorkflowStatus.ucRecoveryRequired == 0U) ? 1U : 0U;
@@ -1448,9 +1588,8 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			continue;
 		}
 		taskENTER_CRITICAL();
-		/* Claim the next business while holding the same critical boundary
-		 * used by deferred manual admission. A later debug request then waits
-		 * for this whole order instead of racing its start. */
+		/* Claim a new order under the same reservation boundary. Debug accepted
+		 * during a running order is inserted only when Robot ownership is free. */
 		if (s_usManualReservations != 0U) {
 			taskEXIT_CRITICAL();
 			if (xQueueSendToFront(s_xOrderQueue, &xOrder, 0U) != pdPASS) {
@@ -1492,7 +1631,10 @@ void vCoffee3WorkflowTask(void *pvArgument)
 			g_xCoffee3WorkflowStatus.ucPositionUncertain = 0U;
 			if (prvQueuePendingOrder() == 0U) {
 				taskENTER_CRITICAL();
-				g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+				if ((s_ucStoragePickupPending == 0U) &&
+					(s_ucStoragePickupActive == 0U)) {
+					g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+				}
 				taskEXIT_CRITICAL();
 			}
 			taskENTER_CRITICAL();
@@ -1540,7 +1682,10 @@ void vCoffee3WorkflowTask(void *pvArgument)
 					(g_xCoffee3WorkflowStatus.ucPositionUncertain == 0U)) {
 					if (prvQueuePendingOrder() == 0U) {
 						taskENTER_CRITICAL();
-						g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+						if ((s_ucStoragePickupPending == 0U) &&
+							(s_ucStoragePickupActive == 0U)) {
+							g_xCoffee3WorkflowStatus.ucOrderAdmissionOpen = 1U;
+						}
 						taskEXIT_CRITICAL();
 					}
 				} else {
@@ -1627,7 +1772,10 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	uint16_t usLogOrder;
 	uint8_t ucInitializationStep;
 	uint8_t ucResultValid;
+	uint8_t ucRobotMotion;
+	uint8_t ucTimeoutLogged;
 	int32_t lCommandResult;
+	int32_t lInterleaveResult;
 	const Coffee3DeviceBinding_t *pxBinding;
 
 	/* FDxx initialization steps are diagnostics; lower steps are order steps. */
@@ -1635,9 +1783,13 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	pxBinding = pxCoffee3DeviceGetBinding(xDeviceId);
 	ucInitializationStep = ((usStep >= 0xFD00U) &&
 		(usStep < 0xFE00U)) ? 1U : 0U;
+	ucRobotMotion = ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
+		(prvRobotPositionAction(xAction) != 0U)) ? 1U : 0U;
+	ucTimeoutLogged = 0U;
 	usLogOrder = (ucOrderStep != 0U) ?
 		g_xCoffee3WorkflowStatus.usCurrentOrderId :
-		COFFEE3_LOG_ORDER_DEBUG;
+		((s_usDetachedPickupLogOrder != 0U) ?
+		 s_usDetachedPickupLogOrder : COFFEE3_LOG_ORDER_DEBUG);
 	if (((ucOrderStep != 0U) || (s_ucMaintenanceActive != 0U)) &&
 		(g_xCoffee3WorkflowStatus.ucCancelRequested != 0U)) {
 		return COFFEE3_WORKFLOW_ERROR_CANCELED;
@@ -1704,10 +1856,9 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 	xTimeoutTicks = pdMS_TO_TICKS((xDeviceId == COFFEE3_DEVICE_ROBOT) ?
 		ulTimeoutMs : (ulTimeoutMs +
 			(4U * COFFEE3_WORKFLOW_DEVICE_IO_TIMEOUT_MS)));
-	if ((xDeviceId == COFFEE3_DEVICE_ROBOT) &&
-		(prvRobotPositionAction(xAction) != 0U)) {
-		/* The Robot owner enforces phase deadlines. This absolute watchdog
-		 * also bounds a command stranded before the owner receives it. */
+	if (ucRobotMotion != 0U) {
+		/* Keep an independent diagnostic deadline for a command stranded before
+		 * the Robot owner receives it. Expiry does not terminate Robot motion. */
 		xTimeoutTicks = pdMS_TO_TICKS(COFFEE3_ROBOT_RECOVERY_TIMEOUT_MS +
 			COFFEE3_ROBOT_ACCEPT_TIMEOUT_MS + COFFEE3_ROBOT_MOTION_TIMEOUT_MS +
 			(COFFEE3_ROBOT_PREPARE_RETRY_LIMIT + 1U) *
@@ -1808,7 +1959,32 @@ static int32_t prvRunStep(uint16_t usStep, Coffee3DeviceId_e xDeviceId,
 				(int32_t)usStep);
 			return COFFEE3_WORKFLOW_ERROR_CANCELED;
 		}
+		/* Coffee1 permits pickup while the coffee machine owns the cup and the
+		 * Robot is free. Reuse this wait loop as the scheduling point; the
+		 * detached pickup steps remain serialized by the Robot owner. */
+		if ((xDeviceId == COFFEE3_DEVICE_COFFEE_MACHINE) &&
+			(xAction == COFFEE3_ACTION_COFFEE_MAKE)) {
+			lInterleaveResult = prvTryRunInterleavedStoragePickup();
+			if (lInterleaveResult != 0) {
+				return lInterleaveResult;
+			}
+		}
 		if ((xTaskGetTickCount() - xStartTick) >= xTimeoutTicks) {
+			if (ucRobotMotion != 0U) {
+				if (ucTimeoutLogged == 0U) {
+					ucTimeoutLogged = 1U;
+					(void)xCoffee3LogPrintfOrder(
+						COFFEE3_LOG_LEVEL_WARNING,
+						COFFEE3_LOG_SOURCE_WORKFLOW,
+						usLogOrder,
+						"Step overdue: device=Robot action=%s step=%u; waiting",
+						prvWorkflowActionName(xAction),
+						(unsigned int)usStep);
+				}
+				prvServiceHotWater();
+				prvServiceIoRefresh();
+				continue;
+			}
 			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_ERROR,
 				COFFEE3_LOG_SOURCE_WORKFLOW,
 				usLogOrder,
@@ -1928,11 +2104,6 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 	}
 	if ((lResult == 0) && (ucOffline != 0U)) {
 		lResult = prvCheckOutputEmpty(usOutput);
-	}
-	if (lResult == 0) {
-		lResult = prvRunStep(30U, COFFEE3_DEVICE_ROBOT,
-		COFFEE3_ACTION_ROBOT_HOME, 0U, 0U,
-		COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
 	}
 	if (lResult == 0) {
 		lResult = prvRunStep(40U, COFFEE3_DEVICE_ROBOT,
@@ -2143,7 +2314,9 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 			COFFEE3_LOG_SOURCE_WORKFLOW, g_xCoffee3WorkflowStatus.usCurrentOrderId,
 			"Content done; report production=2 before placement; no host ACK");
-		lResult = prvCheckOutputEmpty(1U);
+		/* An interleaved online pickup may still own the only outlet. Keep the
+		 * current offline order alive until customer-take ACK releases it. */
+		lResult = prvWaitOutputAvailableForOrder();
 		if (lResult == 0) {
 			prvPublishOutput(1U, 2U);
 			lResult = prvRunStep(180U, COFFEE3_DEVICE_ROBOT,
@@ -2162,11 +2335,6 @@ static int32_t prvRunOrder(const Coffee3Order_t *pxOrder)
 		} else {
 			prvPublishOutput(1U, 3U);
 		}
-	}
-	if (lResult == 0) {
-		lResult = prvRunStep(190U, COFFEE3_DEVICE_ROBOT,
-			COFFEE3_ACTION_ROBOT_HOME, 0U, 0U,
-			COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
 	}
 	return lResult;
 }
@@ -2252,6 +2420,35 @@ static int32_t prvConfirmIceCup(int32_t lEmptyBaselineGram,
 			(unsigned int)COFFEE3_ICE_CUP_DETECT_ATTEMPTS);
 		vTaskDelay(pdMS_TO_TICKS(COFFEE3_ICE_CUP_RETRY_MS));
 	}
+}
+
+/*-----------------------------------------------------------*/
+static uint16_t prvStorageStatusMask(const Coffee3IoState_t *pxIo)
+{
+	uint16_t usPhysicalMask;
+
+	if ((pxIo == NULL) || (prvIoValid(pxIo) == 0U)) {
+		return 0U;
+	}
+	usPhysicalMask = (uint16_t)(
+		((pxIo->xInput.aucMB1XPin[0] != 0U) ? 0x0001U : 0U) |
+		((pxIo->xInput.aucMB1XPin[1] != 0U) ? 0x0002U : 0U));
+	return (uint16_t)(usPhysicalMask & usCoffee3ConfigStorageMask() &
+		COFFEE3_STORAGE_INSTALLED_MASK);
+}
+
+/*-----------------------------------------------------------*/
+static void prvRejectStoragePickup(uint16_t usStorage,
+	const char *pcReason, uint16_t usStatusMask)
+{
+	prvPublishOutputForOrder(1U, 3U, COFFEE3_LOG_ORDER_SYSTEM);
+	vCoffee3ServerFinishRequest(1U);
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+		COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
+		"Pickup failed: device=Robot storage=%u outlet=1 reason=%s status_0x1027=0x%04X",
+		(unsigned int)usStorage,
+		(pcReason != NULL) ? pcReason : "unknown",
+		(unsigned int)usStatusMask);
 }
 
 /*-----------------------------------------------------------*/
@@ -2922,10 +3119,16 @@ static int32_t prvWaitBusinessCondition(uint16_t usStep,
 	Coffee3DeviceId_e xDeviceId;
 	int32_t lResult;
 	uint8_t ucWaitLogged;
+	uint8_t ucOverdueLogged;
+	uint8_t ucPhysicalPlacement;
 	uint8_t ucDelayIndex;
 	TickType_t xStart;
+	const char *pcIoName;
 
 	ucWaitLogged = 0U;
+	ucOverdueLogged = 0U;
+	ucPhysicalPlacement = 0U;
+	pcIoName = NULL;
 	xStart = xTaskGetTickCount();
 	switch (ucCondition) {
 	case COFFEE3_CONDITION_CUP_1:
@@ -2937,21 +3140,41 @@ static int32_t prvWaitBusinessCondition(uint16_t usStep,
 		xDeviceId = COFFEE3_DEVICE_LID_MACHINE;
 		break;
 	case COFFEE3_CONDITION_OUTPUT_1:
+		xDeviceId = COFFEE3_DEVICE_IO_INPUT;
+		ucPhysicalPlacement = 1U;
+		pcIoName = "X3_OUTLET_CUP";
+		break;
 	case COFFEE3_CONDITION_STORAGE_1:
+		xDeviceId = COFFEE3_DEVICE_IO_INPUT;
+		ucPhysicalPlacement = 1U;
+		pcIoName = "X1_FINISHED_FRONT_CUP";
+		break;
 	case COFFEE3_CONDITION_STORAGE_2:
 		xDeviceId = COFFEE3_DEVICE_IO_INPUT;
+		ucPhysicalPlacement = 1U;
+		pcIoName = "X2_FINISHED_REAR_CUP";
 		break;
 	default:
 		return COFFEE3_WORKFLOW_ERROR_UNSUPPORTED;
 	}
 	prvPublish(COFFEE3_WORKFLOW_RUNNING, usStep, 0);
 	for (;;) {
-		if ((xTaskGetTickCount() - xStart) >=
-			pdMS_TO_TICKS(COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS)) {
-			return COFFEE3_WORKFLOW_ERROR_TIMEOUT;
-		}
 		if (g_xCoffee3WorkflowStatus.ucCancelRequested != 0U) {
 			return COFFEE3_WORKFLOW_ERROR_CANCELED;
+		}
+		if ((xTaskGetTickCount() - xStart) >=
+			pdMS_TO_TICKS(COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS)) {
+			if (ucPhysicalPlacement == 0U) {
+				return COFFEE3_WORKFLOW_ERROR_TIMEOUT;
+			}
+			if (ucOverdueLogged == 0U) {
+				ucOverdueLogged = 1U;
+				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+					COFFEE3_LOG_SOURCE_WORKFLOW,
+					g_xCoffee3WorkflowStatus.usCurrentOrderId,
+					"Physical confirmation overdue: device=IoInput io=%s; waiting",
+					pcIoName);
+			}
 		}
 		lResult = prvRefreshDeviceQuiet(usStep, xDeviceId);
 		if (lResult != 0) {
@@ -3624,26 +3847,186 @@ static int32_t prvWaitM50Clean(void)
 }
 
 /*-----------------------------------------------------------*/
+static int32_t prvTryRunInterleavedStoragePickup(void)
+{
+	Coffee3IoState_t xIo;
+	uint16_t usStorage;
+	uint16_t usStorageBit;
+	uint16_t usStatusMask;
+	uint16_t usStoredOrderId;
+	uint8_t ucPhysicalCup;
+	int32_t lResult;
+
+	/* A previously accepted debug action has the next free Robot boundary.
+	 * Pickup remains pending; neither request is turned into a queue. */
+	taskENTER_CRITICAL();
+	usStorage = s_ucStoragePickupPending;
+	if ((usStorage == 0U) || (s_ucStoragePickupActive != 0U) ||
+		(s_ucStoragePickupConfirmStorage != 0U) ||
+		(s_usManualReservations != 0U)) {
+		usStorage = 0U;
+	}
+	taskEXIT_CRITICAL();
+	if (usStorage == 0U) {
+		return 0;
+	}
+	if ((usStorage < 1U) || (usStorage > 2U)) {
+		taskENTER_CRITICAL();
+		s_ucStoragePickupPending = 0U;
+		taskEXIT_CRITICAL();
+		prvRejectStoragePickup(usStorage, "storage unsupported", 0U);
+		return 0;
+	}
+	/* 0x0007 is a host request gate, not a statement that the accepted order
+	 * has finished. Defer until the host clears the request latch. */
+	if (usCoffee3ServerGetCommandRegister(
+		COFFEE3_REG_ORDER_PRESENT) != 0U) {
+		return 0;
+	}
+	if (prvCheckOutputEmpty(1U) != 0) {
+		return 0;
+	}
+	vCoffee3IoGetSnapshot(&xIo);
+	usStorageBit = (uint16_t)(1U << (usStorage - 1U));
+	usStatusMask = prvStorageStatusMask(&xIo);
+	ucPhysicalCup = ((prvIoValid(&xIo) != 0U) &&
+		(xIo.xInput.aucMB1XPin[usStorage - 1U] != 0U)) ? 1U : 0U;
+
+	/* Claim after the read-only checks. A debug reservation arriving before
+	 * this boundary wins; once claimed, Robot ownership is exclusive. */
+	taskENTER_CRITICAL();
+	if ((s_ucStoragePickupPending != (uint8_t)usStorage) ||
+		(s_usManualReservations != 0U) ||
+		(s_ucStoragePickupActive != 0U)) {
+		taskEXIT_CRITICAL();
+		return 0;
+	}
+	s_ucStoragePickupPending = 0U;
+	s_ucStoragePickupActive = 1U;
+	taskEXIT_CRITICAL();
+
+	if ((usCoffee3ConfigStorageMask() & usStorageBit &
+		COFFEE3_STORAGE_INSTALLED_MASK) == 0U) {
+		prvRejectStoragePickup(usStorage, "storage disabled", usStatusMask);
+		s_ucStoragePickupActive = 0U;
+		return 0;
+	}
+	if (ucPhysicalCup == 0U) {
+		prvRejectStoragePickup(usStorage, "cup not detected", usStatusMask);
+		s_ucStoragePickupActive = 0U;
+		return 0;
+	}
+	if ((usStatusMask & usStorageBit) == 0U) {
+		prvRejectStoragePickup(usStorage, "0x1027 storage bit not set",
+			usStatusMask);
+		s_ucStoragePickupActive = 0U;
+		return 0;
+	}
+
+	usStoredOrderId = s_ausStoredOrderId[usStorage - 1U];
+	s_usDetachedPickupLogOrder = (usStoredOrderId != 0U) ?
+		usStoredOrderId : COFFEE3_LOG_ORDER_SYSTEM;
+	g_xCoffee3WorkflowStatus.ucPositionUncertain = 1U;
+	s_usActiveDevices |= (uint16_t)(1U << COFFEE3_DEVICE_ROBOT);
+	vCoffee3ServerSelectStorage(usStorage);
+	prvPublishOutputForOrder(1U, 2U, s_usDetachedPickupLogOrder);
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW, s_usDetachedPickupLogOrder,
+		"Pickup interleave start: device=Robot storage=%u outlet=1 status_0x1027=0x%04X",
+		(unsigned int)usStorage, (unsigned int)usStatusMask);
+	lResult = prvRunStep(0xFC80U, COFFEE3_DEVICE_ROBOT,
+		COFFEE3_ACTION_ROBOT_TAKE_STORAGE, usStorage, 0U,
+		COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
+	if (lResult == 0) {
+		lResult = prvRunStep(0xFC81U, COFFEE3_DEVICE_ROBOT,
+			COFFEE3_ACTION_ROBOT_PUT_OUTPUT, 1U, 0U,
+			COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
+	}
+	if (lResult == 0) {
+		g_xCoffee3WorkflowStatus.ucPositionUncertain = 0U;
+		s_usActiveDevices &= (uint16_t)~(1U << COFFEE3_DEVICE_ROBOT);
+		taskENTER_CRITICAL();
+		s_ucStoragePickupConfirmStorage = (uint8_t)usStorage;
+		s_usStoragePickupConfirmOrderId = usStoredOrderId;
+		s_xStoragePickupConfirmStart = xTaskGetTickCount();
+		s_ucStoragePickupConfirmOverdueLogged = 0U;
+		s_ucStoragePickupActive = 0U;
+		taskEXIT_CRITICAL();
+		vCoffee3ServerFinishRequest(1U);
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_WORKFLOW, s_usDetachedPickupLogOrder,
+			"Pickup Robot released: storage=%u outlet=1; wait X3=1 and source=0",
+			(unsigned int)usStorage);
+		s_usDetachedPickupLogOrder = 0U;
+		return 0;
+	}
+
+	prvPublishOutputForOrder(1U, 3U, s_usDetachedPickupLogOrder);
+	vCoffee3ServerFinishRequest(1U);
+	s_ucStoragePickupActive = 0U;
+	s_usDetachedPickupLogOrder = 0U;
+	return lResult;
+}
+
+/*-----------------------------------------------------------*/
 static int32_t prvRunStoragePickup(uint16_t usStorage)
 {
 	Coffee3IoState_t xIo;
 	int32_t lResult;
+	uint16_t usStoredOrderId;
+	uint16_t usStorageBit;
+	uint16_t usStatusMask;
+	uint8_t ucStorageClearOverdueLogged;
+	TickType_t xStorageClearStart;
+	const char *pcStorageIoName;
 
-	if ((usStorage < 1U) || (usStorage > 2U) ||
-		(s_ausStoredOrderId[usStorage - 1U] == 0U)) {
-		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
-			COFFEE3_LOG_SOURCE_WORKFLOW, COFFEE3_LOG_ORDER_SYSTEM,
-			"Pickup rejected: storage=%u has no finished order (residual/unknown cup)",
-			(unsigned int)usStorage);
-		return COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED;
+	if ((usStorage < 1U) || (usStorage > 2U)) {
+		prvRejectStoragePickup(usStorage, "storage unsupported", 0U);
+		return 0;
+	}
+	usStorageBit = (uint16_t)(1U << (usStorage - 1U));
+	/* Recheck the host order gate immediately before any robot motion. */
+	if (usCoffee3ServerGetCommandRegister(
+		COFFEE3_REG_ORDER_PRESENT) != 0U) {
+		prvRejectStoragePickup(usStorage, "0x0007 order request not cleared", 0U);
+		return 0;
+	}
+	if ((usCoffee3ConfigStorageMask() & usStorageBit &
+		COFFEE3_STORAGE_INSTALLED_MASK) == 0U) {
+		prvRejectStoragePickup(usStorage, "storage disabled", 0U);
+		return 0;
 	}
 	lResult = prvCheckOutputEmpty(1U);
-	vCoffee3IoGetSnapshot(&xIo);
-	if ((lResult != 0) || (prvIoValid(&xIo) == 0U) ||
-		(xIo.xInput.aucMB1XPin[usStorage - 1U] == 0U)) {
-		return COFFEE3_WORKFLOW_ERROR_INIT_OCCUPIED;
+	if (lResult != 0) {
+		prvRejectStoragePickup(usStorage, "outlet unavailable", 0U);
+		return 0;
 	}
-	g_xCoffee3WorkflowStatus.usCurrentOrderId = s_ausStoredOrderId[usStorage - 1U];
+	vCoffee3IoGetSnapshot(&xIo);
+	usStatusMask = prvStorageStatusMask(&xIo);
+	if (prvIoValid(&xIo) == 0U) {
+		prvRejectStoragePickup(usStorage, "IoInput stale", usStatusMask);
+		return 0;
+	}
+	if (xIo.xInput.aucMB1XPin[usStorage - 1U] == 0U) {
+		prvRejectStoragePickup(usStorage, "cup not detected", usStatusMask);
+		return 0;
+	}
+	if ((usStatusMask & usStorageBit) == 0U) {
+		prvRejectStoragePickup(usStorage, "0x1027 storage bit not set",
+			usStatusMask);
+		return 0;
+	}
+	/* The host pickup request plus the physical cup sensor are authoritative.
+	 * The RAM order id is optional correlation and is lost after a restart. */
+	usStoredOrderId = s_ausStoredOrderId[usStorage - 1U];
+	g_xCoffee3WorkflowStatus.usCurrentOrderId = (usStoredOrderId != 0U) ?
+		usStoredOrderId : COFFEE3_LOG_ORDER_SYSTEM;
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+		COFFEE3_LOG_SOURCE_WORKFLOW,
+		g_xCoffee3WorkflowStatus.usCurrentOrderId,
+		"Pickup start: device=Robot storage=%u outlet=1 tracked_order=%u status_0x1027=0x%04X",
+		(unsigned int)usStorage, (unsigned int)usStoredOrderId,
+		(unsigned int)usStatusMask);
 	vCoffee3ServerSelectStorage(usStorage);
 	prvPublishOutput(1U, 2U);
 	lResult = prvRunStep(800U, COFFEE3_DEVICE_ROBOT,
@@ -3657,10 +4040,35 @@ static int32_t prvRunStoragePickup(uint16_t usStorage)
 	if (lResult == 0) {
 		lResult = prvWaitBusinessCondition(815U, COFFEE3_CONDITION_OUTPUT_1);
 	}
-	vCoffee3IoGetSnapshot(&xIo);
-	if ((lResult == 0) && ((prvIoValid(&xIo) == 0U) ||
-		(xIo.xInput.aucMB1XPin[usStorage - 1U] != 0U))) {
-		lResult = COFFEE3_WORKFLOW_ERROR_IO;
+	ucStorageClearOverdueLogged = 0U;
+	xStorageClearStart = xTaskGetTickCount();
+	pcStorageIoName = (usStorage == 1U) ?
+		"X1_FINISHED_FRONT_CUP" : "X2_FINISHED_REAR_CUP";
+	while (lResult == 0) {
+		if (g_xCoffee3WorkflowStatus.ucCancelRequested != 0U) {
+			lResult = COFFEE3_WORKFLOW_ERROR_CANCELED;
+			break;
+		}
+		lResult = prvRefreshDeviceQuiet(816U, COFFEE3_DEVICE_IO_INPUT);
+		vCoffee3IoGetSnapshot(&xIo);
+		if ((lResult != 0) || (prvIoValid(&xIo) == 0U)) {
+			lResult = (lResult != 0) ? lResult : COFFEE3_WORKFLOW_ERROR_IO;
+			break;
+		}
+		if (xIo.xInput.aucMB1XPin[usStorage - 1U] == 0U) {
+			break;
+		}
+		if ((ucStorageClearOverdueLogged == 0U) &&
+			((xTaskGetTickCount() - xStorageClearStart) >=
+			 pdMS_TO_TICKS(COFFEE3_WORKFLOW_DEFAULT_TIMEOUT_MS))) {
+			ucStorageClearOverdueLogged = 1U;
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_WORKFLOW,
+				g_xCoffee3WorkflowStatus.usCurrentOrderId,
+				"Physical confirmation overdue: device=IoInput io=%s expected=0; waiting",
+				pcStorageIoName);
+		}
+		prvDelayWithServices(500U);
 	}
 	if (lResult != 0) {
 		prvPublishOutput(1U, 3U);
@@ -3672,11 +4080,7 @@ static int32_t prvRunStoragePickup(uint16_t usStorage)
 	s_ucPickupPending = 0U;
 	s_ucEmptyTiming = 0U;
 	prvStartDoor(2U);
-	lResult = prvRunStep(820U, COFFEE3_DEVICE_ROBOT,
-		COFFEE3_ACTION_ROBOT_HOME, 0U, 0U, COFFEE3_WORKFLOW_ROBOT_MOTION_MS);
-	if (lResult == 0) {
-		g_xCoffee3WorkflowStatus.ucPositionUncertain = 0U;
-	}
+	g_xCoffee3WorkflowStatus.ucPositionUncertain = 0U;
 	return lResult;
 }
 

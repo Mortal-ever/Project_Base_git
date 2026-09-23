@@ -1,9 +1,21 @@
 /**
-  * @file      transport_tcp.c
-  * @brief     Implement LwIP Netconn and nonblocking Socket backends.
-  * @author    WHong
-  * @date      2026-07-28
-  */
+ * @file      transport_tcp.c
+ * @brief     基于 LwIP Netconn 与非阻塞 Socket 的 TCP Transport 后端。
+ * @author    WHong
+ * @date      2026-07-28
+ *
+ * @details
+ * 本文件实现两套 TCP 后端：
+ * - s_xTcpOps：Netconn Client 与单活动会话 Server；
+ * - s_xTcpSocketOps：由外部 Listener accept 后附着的固定 Socket 会话通道。
+ *
+ * 两种后端都通过 TransportOps_t 暴露统一 open/close/send/receive/control/state/error 接口，
+ * 并把具体实例通过 pvContext 传回。Channel 与 Context 存储由调用者拥有；Netconn、netbuf
+ * 或已附着 Socket 描述符则由对应 Context 在打开/关闭过程中管理。
+ *
+ * TCP 是字节流协议，单次发送/接收不保证对应一整帧，因此实现中显式处理短写、短读、
+ * netbuf 剩余数据以及总超时预算，避免把一次底层调用误当成完整协议事务。
+ */
 
 #include "transport_tcp.h"
 
@@ -19,189 +31,68 @@
 #include "lwip/tcpip.h"
 #include "task.h"
 
-/**
-  * @brief  打开已配置的 Netconn 端点。
-  * @param[in,out] pvContext TransportTcpContext_t 上下文。
-  * @retval TransportResult_e 打开结果。
-  */
 static TransportResult_e prvOpen(void *pvContext);
-/**
-  * @brief  关闭上下文拥有的全部 Netconn 资源。
-  * @param[in,out] pvContext TransportTcpContext_t 上下文。
-  * @retval TransportResult_e 关闭结果。
-  */
+
 static TransportResult_e prvClose(void *pvContext);
-/**
-  * @brief  在一个总截止时间内发送完整 Netconn 字节序列。
-  * @param[in,out] pvContext TransportTcpContext_t 上下文。
-  * @param[in] pucData 待发送数据。
-  * @param[in] usDataLen 待发送字节数。
-  * @param[out] pusSentLen 实际发送字节数。
-  * @param[in] ulTimeoutMs 总超时时间，单位为毫秒。
-  * @retval TransportResult_e 发送结果。
-  */
+
 static TransportResult_e prvSend(void *pvContext,
 	const uint8_t *pucData, uint16_t usDataLen, uint16_t *pusSentLen,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief  接收指定上限的字节并保留 netbuf 未消费部分。
-  * @param[in,out] pvContext TransportTcpContext_t 上下文。
-  * @param[out] pucData 接收缓冲区。
-  * @param[in] usMaxLen 接收缓冲区容量。
-  * @param[out] pusReceivedLen 实际接收字节数。
-  * @param[in] ulTimeoutMs 接收总超时时间，单位为毫秒。
-  * @retval TransportResult_e 接收结果。
-  */
+
 static TransportResult_e prvReceive(void *pvContext,
 	uint8_t *pucData, uint16_t usMaxLen, uint16_t *pusReceivedLen,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief  执行一个 Netconn 专用控制请求。
-  * @param[in,out] pvContext TransportTcpContext_t 上下文。
-  * @param[in] xCommand 控制命令。
-  * @param[in,out] pvArgument 控制参数，按命令类型解释，可以为 NULL。
-  * @retval TransportResult_e 控制结果。
-  */
+
 static TransportResult_e prvControl(void *pvContext,
 	TransportControl_e xCommand, void *pvArgument);
-/**
-  * @brief  读取 Netconn 后端生命周期状态。
-  * @param[in] pvContext TransportTcpContext_t 上下文。
-  * @retval 当前 TransportState_e 状态。
-  */
+
 static TransportState_e prvGetState(void *pvContext);
-/**
-  * @brief  读取最新的 LwIP 原生错误值。
-  * @param[in] pvContext TransportTcpContext_t 上下文。
-  * @retval LwIP 错误值；上下文无效时返回 0。
-  */
+
 static int32_t prvGetNativeError(void *pvContext);
-/**
-  * @brief  创建并连接 Netconn 客户端端点。
-  * @param[in,out] pxContext TCP 客户端上下文。
-  * @retval TransportResult_e 连接结果。
-  */
+
 static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext);
-/**
-  * @brief  Wait for a nonblocking Netconn client connection to finish.
-  * @param[in,out] pxContext TCP client context with a pending connection.
-  * @param[in] ulTimeoutMs Total connection deadline in milliseconds.
-  * @retval ERR_OK when connected, ERR_TIMEOUT at the deadline, or LwIP error.
-  */
+
 static err_t prvWaitClientConnect(TransportTcpContext_t *pxContext,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief Verify one pending Netconn connection inside the TCP/IP core.
-  * @param[in,out] pvContext TransportTcpContext_t being checked.
-  * @note This callback is the sole reader of the raw TCP PCB state.
-  */
+
 static void prvCheckClientConnectInCore(void *pvContext);
-/**
-  * @brief  创建、绑定并监听 Netconn Server 端点。
-  * @param[in,out] pxContext TCP Server 上下文。
-  * @retval TransportResult_e 监听结果。
-  */
+
 static TransportResult_e prvOpenServer(TransportTcpContext_t *pxContext);
-/**
-  * @brief  为单会话 Netconn Server 接收一个客户端。
-  * @param[in,out] pxContext TCP Server 上下文。
-  * @param[in] ulTimeoutMs 接收连接的超时时间，单位为毫秒。
-  * @retval TransportResult_e 接收结果。
-  */
+
 static TransportResult_e prvAcceptClient(TransportTcpContext_t *pxContext,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief  关闭活动 Netconn 连接并释放缓存接收数据。
-  * @param[in,out] pxContext TCP 上下文。
-  */
+
 static void prvCloseConnection(TransportTcpContext_t *pxContext);
-/**
-  * @brief  删除保留的 netbuf 并复位读取游标。
-  * @param[in,out] pxContext TCP 上下文。
-  */
+
 static void prvDeleteNetbuf(TransportTcpContext_t *pxContext);
-/**
-  * @brief  将 LwIP err_t 映射为统一 TransportResult_e。
-  * @param[in] xError LwIP 原生错误值。
-  * @retval 规范化 TransportResult_e。
-  */
+
 static TransportResult_e prvMapLwipError(err_t xError);
-/**
-  * @brief  校验已接受的 Socket 会话是否已附着。
-  * @param[in,out] pvContext Socket 会话上下文。
-  * @retval TransportResult_e 校验结果。
-  */
+
 static TransportResult_e prvSocketOpen(void *pvContext);
-/**
-  * @brief  关闭并解除已接受的 Socket 描述符。
-  * @param[in,out] pvContext Socket 会话上下文。
-  * @retval TransportResult_e 关闭结果。
-  */
+
 static TransportResult_e prvSocketClose(void *pvContext);
-/**
-  * @brief  在非阻塞 Socket 上发送完整字节序列。
-  * @param[in,out] pvContext Socket 会话上下文。
-  * @param[in] pucData 待发送数据。
-  * @param[in] usDataLen 待发送字节数。
-  * @param[out] pusSentLen 实际发送字节数。
-  * @param[in] ulTimeoutMs 总超时时间，单位为毫秒。
-  * @retval TransportResult_e 发送结果。
-  */
+
 static TransportResult_e prvSocketSend(void *pvContext,
 	const uint8_t *pucData, uint16_t usDataLen, uint16_t *pusSentLen,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief  从非阻塞的已接受 Socket 接收字节。
-  * @param[in,out] pvContext Socket 会话上下文。
-  * @param[out] pucData 接收缓冲区。
-  * @param[in] usMaxLen 接收缓冲区容量。
-  * @param[out] pusReceivedLen 实际接收字节数。
-  * @param[in] ulTimeoutMs 接收总超时时间，单位为毫秒。
-  * @retval TransportResult_e 接收结果。
-  */
+
 static TransportResult_e prvSocketReceive(void *pvContext,
 	uint8_t *pucData, uint16_t usMaxLen, uint16_t *pusReceivedLen,
 	uint32_t ulTimeoutMs);
-/**
-  * @brief  执行 Socket 会话控制请求。
-  * @param[in,out] pvContext Socket 会话上下文。
-  * @param[in] xCommand 控制命令。
-  * @param[in,out] pvArgument 控制参数，按命令类型解释。
-  * @retval TransportResult_e 控制结果。
-  */
+
 static TransportResult_e prvSocketControl(void *pvContext,
 	TransportControl_e xCommand, void *pvArgument);
-/**
-  * @brief  读取已接受 Socket 会话的生命周期状态。
-  * @param[in] pvContext Socket 会话上下文。
-  * @retval 当前 TransportState_e 状态。
-  */
+
 static TransportState_e prvSocketGetState(void *pvContext);
-/**
-  * @brief  读取 Socket 最新 errno 值。
-  * @param[in] pvContext Socket 会话上下文。
-  * @retval Socket errno；上下文无效时返回 0。
-  */
+
 static int32_t prvSocketGetNativeError(void *pvContext);
-/**
-  * @brief  将 Socket errno 映射为统一 TransportResult_e。
-  * @param[in] lError Socket 原生错误值。
-  * @retval 规范化 TransportResult_e。
-  */
+
 static TransportResult_e prvMapSocketError(int lError);
-/**
-  * @brief  Append one unsigned decimal value to a bounded text buffer.
-  * @param[in,out] pcText Output text buffer.
-  * @param[in] usCapacity Buffer capacity including the terminator.
-  * @param[in,out] pusLength Current and resulting text length.
-  * @param[in] usValue Value to append.
-  * @retval 1 Value was appended and space remains for the terminator.
-  * @retval 0 Output capacity is insufficient or an argument is invalid.
-  */
+
 static uint8_t prvAppendUnsignedDecimal(char *pcText, uint16_t usCapacity,
 	uint16_t *pusLength, uint16_t usValue);
 
-/** @brief Netconn operation table for client and single-session server use. */
+/** @brief Netconn Client / 单会话 Server 共用的后端操作表。 */
 static const TransportOps_t s_xTcpOps = {
 	prvOpen,
 	prvClose,
@@ -212,7 +103,7 @@ static const TransportOps_t s_xTcpOps = {
 	prvGetNativeError
 };
 
-/** @brief Socket operation table used by accepted session channels. */
+/** @brief 已接受 Socket 会话使用的后端操作表。 */
 static const TransportOps_t s_xTcpSocketOps = {
 	prvSocketOpen,
 	prvSocketClose,
@@ -223,8 +114,25 @@ static const TransportOps_t s_xTcpSocketOps = {
 	prvSocketGetNativeError
 };
 
-/* Formats an endpoint without pulling a stdio formatter into the firmware. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  将 IPv4 地址和端口格式化为受限长度的 "a.b.c.d:port" 文本。
+ *
+ * @details
+ * 为避免在固件中额外引入 printf 格式化开销，本函数逐段追加十进制数字和分隔符。
+ * 每次写入前都检查剩余容量，并始终为字符串结尾的 '\0' 预留空间；任一步失败都会把
+ * 输出首字符清零，使调用者得到明确的空字符串。
+ *
+ * @param[in]  pucIpv4    四字节 IPv4 地址。
+ * @param[in]  usPort     TCP 端口。
+ * @param[out] pcText     输出字符缓冲区。
+ * @param[in]  usCapacity 缓冲区总容量，包含结尾 '\0'。
+ *
+ * @retval 1 格式化成功。
+ * @retval 0 参数无效或缓冲区容量不足。
+ */
+
 uint8_t ucTransportTcpFormatIpv4Endpoint(const uint8_t pucIpv4[4],
 	uint16_t usPort, char *pcText, uint16_t usCapacity)
 {
@@ -265,6 +173,22 @@ uint8_t ucTransportTcpFormatIpv4Endpoint(const uint8_t pucIpv4[4],
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  向有界文本缓冲区追加一个 uint16_t 十进制数。
+ *
+ * @details
+ * 先把低位到高位数字写入局部反向数组，再逆序复制到目标缓冲区。函数不负责追加 '\0'，
+ * 但在容量判断中始终保留一个终止字符空间，由上层统一结束字符串。
+ *
+ * @param[in,out] pcText      输出缓冲区。
+ * @param[in]     usCapacity  缓冲区容量。
+ * @param[in,out] pusLength   当前长度，成功后更新为新长度。
+ * @param[in]     usValue     待追加数值。
+ *
+ * @retval 1 追加成功。
+ * @retval 0 参数无效或容量不足。
+ */
 static uint8_t prvAppendUnsignedDecimal(char *pcText, uint16_t usCapacity,
 	uint16_t *pusLength, uint16_t usValue)
 {
@@ -295,13 +219,31 @@ static uint8_t prvAppendUnsignedDecimal(char *pcText, uint16_t usCapacity,
 	return 1U;
 }
 
-/* Initializes caller-owned storage and registers the TCP operation table. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  创建并注册一个基于 LwIP Netconn 的 TCP Transport 通道。
+ *
+ * @details
+ * 调用者提供 Channel、Context、名称和配置存储；本函数清零 Channel/Context，将配置按值
+ * 复制到 Context，并绑定静态 s_xTcpOps 操作表和 pvContext。随后调用 xTransportRegister()
+ * 把 Channel 指针加入公共注册表。Channel/Context 本体仍由调用者拥有，本函数不动态分配它们。
+ *
+ * @param[out] pxChannel  调用者提供的 TransportChannel_t。
+ * @param[out] pxContext  调用者提供的 Netconn TCP Context。
+ * @param[in]  pcName     通道名称；注册期间必须持续有效。
+ * @param[in]  pxConfig   TCP 配置，函数内部按值复制。
+ *
+ * @retval TRANSPORT_RESULT_OK 创建并注册成功。
+ * @retval TRANSPORT_RESULT_INVALID_ARG 参数、端口或模式无效。
+ * @retval 其他 TransportResult_e 注册失败。
+ */
+
 TransportResult_e xTransportTcpCreate(TransportChannel_t *pxChannel,
 	TransportTcpContext_t *pxContext, const char *pcName,
 	const TransportTcpConfig_t *pxConfig)
 {
-	/* ① 参数校验。 */
+	
 	if ((pxChannel == NULL) || (pxContext == NULL) ||
 		(pcName == NULL) || (pxConfig == NULL) ||
 		(pxConfig->usPort == 0U)) {
@@ -311,30 +253,44 @@ TransportResult_e xTransportTcpCreate(TransportChannel_t *pxChannel,
 		(pxConfig->xMode != TRANSPORT_TCP_MODE_SERVER)) {
 		return TRANSPORT_RESULT_INVALID_ARG;
 	}
-	/* ② 清零上下文和通道。 */
+	
 	memset(pxContext, 0, sizeof(*pxContext));
 	memset(pxChannel, 0, sizeof(*pxChannel));
 
-	/* ③ 保存配置到上下文。 */
 	pxContext->pxChannel = pxChannel;
+	/* 配置结构按值复制；其中若含指针成员，指针目标仍由外部保证生命周期。 */
 	pxContext->xConfig = *pxConfig;
 	pxContext->xState = TRANSPORT_STATE_CLOSED;
 	IP_ADDR4(&pxContext->xRemoteAddress,
 		pxConfig->aucRemoteIp[0], pxConfig->aucRemoteIp[1],
-		pxConfig->aucRemoteIp[2], pxConfig->aucRemoteIp[3]); /* 设置远程 IP。 */
+		pxConfig->aucRemoteIp[2], pxConfig->aucRemoteIp[3]); 
 
-	/* ④ 绑定函数指针表。 */
-	pxChannel->pcName = pcName;  		/* 通道名称，例如 RobotTcp。 */
-	pxChannel->pxOps = &s_xTcpOps;  	/* TCP 操作表。 */
-	pxChannel->pvContext = pxContext; 	/* 后端上下文。 */
+	pxChannel->pcName = pcName;  		
+	/* 绑定共享 Netconn 操作表；pvContext 再把调用恢复到当前 TCP 实例。 */
+	pxChannel->pxOps = &s_xTcpOps;  	
+	pxChannel->pvContext = pxContext; 	
 	pxChannel->xState = TRANSPORT_STATE_CLOSED;
 
-	/* ⑤ 调用 xTransportRegister 注册到全局表。 */
 	return xTransportRegister(pxChannel);
 }
 
-/* Creates a reusable protocol channel before any client is accepted. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  创建并注册一个可复用的“已接受 Socket 会话”Transport 通道。
+ *
+ * @details
+ * 该接口只建立固定 Channel/Context 和 Socket 操作表，不创建或 accept 套接字。
+ * Context 初始 lSocket 为 -1，后续由 xTransportTcpSocketAttach() 把外部已接受的描述符
+ * 绑定进来。这样协议对象可长期存在，而每次客户端连接只替换底层 socket 描述符。
+ *
+ * @param[out] pxChannel 调用者提供的 Channel。
+ * @param[out] pxContext 调用者提供的 Socket Context。
+ * @param[in]  pcName    通道名称。
+ *
+ * @retval TransportResult_e 创建或注册结果。
+ */
+
 TransportResult_e xTransportTcpSocketCreate(TransportChannel_t *pxChannel,
 	TransportTcpSocketContext_t *pxContext, const char *pcName)
 {
@@ -353,8 +309,23 @@ TransportResult_e xTransportTcpSocketCreate(TransportChannel_t *pxChannel,
 	return xTransportRegister(pxChannel);
 }
 
-/* Attaches one accepted socket without allocating a protocol object. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  把一个已经 accept 的 Socket 描述符附着到固定 Transport 通道。
+ *
+ * @details
+ * 本函数不创建协议对象，只把 lSocket 写入与 pxChannel 匹配的 Context，然后通过
+ * xTransportOpen() 验证并把通道置为 OPEN。若 Context 已经持有描述符则返回 BUSY，
+ * 防止覆盖仍在使用的会话。
+ *
+ * @param[in,out] pxChannel  目标固定通道。
+ * @param[in,out] pxContext  与该通道绑定的 Socket Context。
+ * @param[in]     lSocket    已接受的有效 Socket 描述符。
+ *
+ * @retval TransportResult_e 附着并打开结果。
+ */
+
 TransportResult_e xTransportTcpSocketAttach(TransportChannel_t *pxChannel,
 	TransportTcpSocketContext_t *pxContext, int lSocket)
 {
@@ -371,8 +342,20 @@ TransportResult_e xTransportTcpSocketAttach(TransportChannel_t *pxChannel,
 	return xTransportOpen(pxChannel);
 }
 
-/* Selects client connect or server listen according to immutable config. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  根据 TCP Context 配置选择 Netconn Client 或 Server 打开路径。
+ *
+ * @details
+ * s_xTcpOps 的 xOpen 统一指向本函数。它首先把 Context 转回 TransportTcpContext_t，
+ * 若已 OPEN 则幂等返回；否则进入 BUSY，并依据 xConfig.xMode 分派到 prvOpenClient()
+ * 或 prvOpenServer()。
+ *
+ * @param[in,out] pvContext TransportTcpContext_t 上下文。
+ *
+ * @retval TransportResult_e Client 连接或 Server 监听结果。
+ */
 static TransportResult_e prvOpen(void *pvContext)
 {
 	TransportTcpContext_t *pxContext;
@@ -392,8 +375,22 @@ static TransportResult_e prvOpen(void *pvContext)
 	return prvOpenServer(pxContext);
 }
 
-/* Creates one netconn and performs the bounded robot TCP connection. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  创建 Netconn TCP Client，并在配置的截止时间内完成连接。
+ *
+ * @details
+ * 连接前先检查默认网络接口是否存在、UP、Link UP 且拥有有效 IPv4。随后创建 netconn，
+ * 可选通过 usReserveLocalPort() 取得本地端口并 bind，再设置收发超时。配置了连接超时时，
+ * 使用 nonblocking connect + prvWaitClientConnect() 实现有界连接；成功后恢复 blocking 模式。
+ * 任一步失败都会记录 LwIP 原生错误并关闭已创建连接资源。
+ *
+ * @param[in,out] pxContext TCP Client Context。
+ *
+ * @retval TRANSPORT_RESULT_OK 已连接。
+ * @retval 其他 TransportResult_e 网络未就绪、资源不足、超时或连接错误。
+ */
 static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext)
 {
 	err_t xError;
@@ -407,6 +404,7 @@ static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext)
 		return TRANSPORT_RESULT_NOT_READY;
 	}
 
+	/* Netconn 对象属于当前 Context 的运行期资源，失败/关闭路径负责释放。 */
 	pxContext->pxConnection = netconn_new(NETCONN_TCP);
 	if (pxContext->pxConnection == NULL) {
 		pxContext->lLastNativeError = (int32_t)ERR_MEM;
@@ -455,8 +453,23 @@ static TransportResult_e prvOpenClient(TransportTcpContext_t *pxContext)
 	return TRANSPORT_RESULT_OK;
 }
 
-/* Waits for LwIP's nonblocking connect callback or the local deadline. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  轮询等待非阻塞 Netconn Client 连接完成。
+ *
+ * @details
+ * 使用 sys_now() 建立总连接截止时间，并通过 tcpip_callback_with_block() 把 PCB 状态检查
+ * 放到 LwIP TCP/IP Core 执行。只要状态仍为 ERR_INPROGRESS 就周期性重试，超过总预算返回
+ * ERR_TIMEOUT；该循环不会在每次检查时重置连接总超时。
+ *
+ * @param[in,out] pxContext   正在连接的 TCP Context。
+ * @param[in]     ulTimeoutMs 总连接超时时间。
+ *
+ * @retval ERR_OK 连接建立。
+ * @retval ERR_TIMEOUT 总预算耗尽。
+ * @retval 其他 err_t LwIP 检查或连接错误。
+ */
 static err_t prvWaitClientConnect(TransportTcpContext_t *pxContext,
 	uint32_t ulTimeoutMs)
 {
@@ -485,8 +498,18 @@ static err_t prvWaitClientConnect(TransportTcpContext_t *pxContext,
 	}
 }
 
-/* Verify a completed nonblocking connect in the TCP/IP core only. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  在 LwIP TCP/IP Core 上下文中检查一次非阻塞连接状态。
+ *
+ * @details
+ * 该函数直接查看 netconn 的 nonblocking-connect 标志、pending_err 与底层 TCP PCB 状态，
+ * 并把检查结果写回 Context，最后置 ucConnectCheckComplete 通知等待任务。把 PCB 访问限定
+ * 在 TCP/IP Core 中，避免普通任务直接跨线程读取 raw PCB 状态。
+ *
+ * @param[in,out] pvContext TransportTcpContext_t 上下文。
+ */
 static void prvCheckClientConnectInCore(void *pvContext)
 {
 	TransportTcpContext_t *pxContext;
@@ -514,8 +537,21 @@ static void prvCheckClientConnectInCore(void *pvContext)
 	pxContext->ucConnectCheckComplete = 1U;
 }
 
-/* Creates and binds a generic server listener; accept occurs on receive. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  创建、绑定并监听 Netconn TCP Server。
+ *
+ * @details
+ * Server 打开阶段只创建 listener、bind 到配置端口并 listen，不在这里阻塞等待客户端。
+ * 具体 accept 延迟到 prvReceive() 首次需要数据且当前没有活动连接时执行，因此一个 OPEN
+ * Server 可以在没有客户端时保持监听状态。
+ *
+ * @param[in,out] pxContext TCP Server Context。
+ *
+ * @retval TRANSPORT_RESULT_OK Listener 已建立。
+ * @retval 其他 TransportResult_e 资源、绑定或监听失败。
+ */
 static TransportResult_e prvOpenServer(TransportTcpContext_t *pxContext)
 {
 	err_t xError;
@@ -545,6 +581,19 @@ static TransportResult_e prvOpenServer(TransportTcpContext_t *pxContext)
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  关闭 Netconn TCP Context 的活动连接和 Listener。
+ *
+ * @details
+ * 先通过 prvCloseConnection() 删除残留 netbuf 并关闭活动会话，再关闭/删除 Listener，
+ * 最后把 Context 状态置为 CLOSED。Context 和 Channel 存储仍由调用者拥有，不在此释放。
+ *
+ * @param[in,out] pvContext TransportTcpContext_t 上下文。
+ *
+ * @retval TRANSPORT_RESULT_OK 关闭完成。
+ * @retval TRANSPORT_RESULT_INVALID_ARG Context 无效。
+ */
 static TransportResult_e prvClose(void *pvContext)
 {
 	TransportTcpContext_t *pxContext;
@@ -564,8 +613,25 @@ static TransportResult_e prvClose(void *pvContext)
 	return TRANSPORT_RESULT_OK;
 }
 
-/* Sends all requested bytes or returns a mapped LwIP error. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  在一个总发送预算内通过 Netconn 写完全部请求字节。
+ *
+ * @details
+ * netconn_write_partly() 可能一次只写入部分数据，因此通过 uxTotalWritten 持续推进偏移。
+ * 每次调用前都根据 sys_now() 重新计算“剩余总预算”，并把剩余值写给 Netconn send timeout，
+ * 从而保证分段发送不会反复获得完整 timeout。短写、错误或超时会关闭当前活动连接。
+ *
+ * @param[in,out] pvContext    TransportTcpContext_t 上下文。
+ * @param[in]     pucData      待发送数据。
+ * @param[in]     usDataLen    总字节数。
+ * @param[out]    pusSentLen   实际累计发送字节数。
+ * @param[in]     ulTimeoutMs  整体发送超时时间。
+ *
+ * @retval TRANSPORT_RESULT_OK 完整发送成功。
+ * @retval 其他 TransportResult_e 超时、断开或 LwIP 错误。
+ */
 static TransportResult_e prvSend(void *pvContext,
 	const uint8_t *pucData, uint16_t usDataLen, uint16_t *pusSentLen,
 	uint32_t ulTimeoutMs)
@@ -589,6 +655,7 @@ static TransportResult_e prvSend(void *pvContext,
 	}
 
 	uxTotalWritten = 0U;
+	/* 一次 write 可能短写，因此循环累计，同时始终受同一个总截止时间约束。 */
 	ulStartMs = sys_now();
 	xError = ERR_OK;
 	while (uxTotalWritten < (size_t)usDataLen) {
@@ -636,11 +703,25 @@ static TransportResult_e prvSend(void *pvContext,
 	return TRANSPORT_RESULT_OK;
 }
 
-/*
- * Receives from the active connection and preserves unused netbuf data.
- * Server mode accepts a client here before waiting for its first request.
- */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  从 Netconn 活动连接读取数据，并保留未消费的 netbuf 字节。
+ *
+ * @details
+ * Server 模式在没有活动连接时先调用 prvAcceptClient()。只有当前没有缓存 netbuf 时才执行
+ * netconn_recv()；收到 netbuf 后，按 usRxOffset 从中复制最多 usMaxLen 字节给调用者。
+ * 若一次没有消费完整 netbuf，则剩余数据和偏移保留到下一次 receive，避免丢失 TCP 流中
+ * 同一 netbuf 内尚未读取的字节。
+ *
+ * @param[in,out] pvContext       TransportTcpContext_t 上下文。
+ * @param[out]    pucData         接收缓冲区。
+ * @param[in]     usMaxLen        本次最多复制字节数。
+ * @param[out]    pusReceivedLen  实际复制字节数。
+ * @param[in]     ulTimeoutMs     本次 Netconn 等待超时。
+ *
+ * @retval TransportResult_e 接收结果。
+ */
 static TransportResult_e prvReceive(void *pvContext,
 	uint8_t *pucData, uint16_t usMaxLen, uint16_t *pusReceivedLen,
 	uint32_t ulTimeoutMs)
@@ -670,6 +751,7 @@ static TransportResult_e prvReceive(void *pvContext,
 		return TRANSPORT_RESULT_NOT_OPEN;
 	}
 
+	/* 只有缓存 netbuf 已消费完才向 LwIP 请求新的数据块。 */
 	if (pxContext->pxRxBuffer == NULL) {
 		netconn_set_recvtimeout(pxContext->pxConnection, ulTimeoutMs);
 		xError = netconn_recv(pxContext->pxConnection,
@@ -699,6 +781,7 @@ static TransportResult_e prvReceive(void *pvContext,
 		return TRANSPORT_RESULT_IO_ERROR;
 	}
 
+	/* 未消费完的 netbuf 保留在 Context 中，下一次 receive 从 usRxOffset 继续。 */
 	pxContext->usRxOffset = (uint16_t)(pxContext->usRxOffset + usCopyLen);
 	*pusReceivedLen = usCopyLen;
 	if (pxContext->usRxOffset >= netbuf_len(pxContext->pxRxBuffer)) {
@@ -707,8 +790,21 @@ static TransportResult_e prvReceive(void *pvContext,
 	return TRANSPORT_RESULT_OK;
 }
 
-/* Accepts one server client with the configured receive timeout. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  为单会话 Netconn Server 接受一个客户端连接。
+ *
+ * @details
+ * 使用本次调用提供的 ulTimeoutMs 设置 Listener 接收超时并执行 netconn_accept()。
+ * accept 成功后再为活动连接恢复配置中的普通 IO 收发超时。当前 Context 只保存一个
+ * pxConnection，因此该路径表达的是单活动会话模型。
+ *
+ * @param[in,out] pxContext   TCP Server Context。
+ * @param[in]     ulTimeoutMs 本次 accept 超时。
+ *
+ * @retval TransportResult_e accept 结果。
+ */
 static TransportResult_e prvAcceptClient(TransportTcpContext_t *pxContext,
 	uint32_t ulTimeoutMs)
 {
@@ -734,6 +830,22 @@ static TransportResult_e prvAcceptClient(TransportTcpContext_t *pxContext,
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  执行 Netconn TCP Context 控制命令。
+ *
+ * @details
+ * 当前只支持 TRANSPORT_CTRL_CONNECTION_RESET：关闭当前活动连接并释放缓存数据。
+ * Client 重置后回到 CLOSED；Server 若 Listener 仍存在则保持 OPEN，等待下一次 receive
+ * 再 accept 新客户端。
+ *
+ * @param[in,out] pvContext  TransportTcpContext_t 上下文。
+ * @param[in]     xCommand   控制命令。
+ * @param[in,out] pvArgument 当前实现未使用。
+ *
+ * @retval TRANSPORT_RESULT_OK 重置成功。
+ * @retval TRANSPORT_RESULT_NOT_SUPPORTED 命令不支持。
+ */
 static TransportResult_e prvControl(void *pvContext,
 	TransportControl_e xCommand, void *pvArgument)
 {
@@ -758,6 +870,14 @@ static TransportResult_e prvControl(void *pvContext,
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  返回 Netconn TCP Context 当前生命周期状态。
+ *
+ * @param[in] pvContext TransportTcpContext_t 上下文。
+ *
+ * @retval TransportState_e 当前状态；Context 无效时返回 UNINITIALIZED。
+ */
 static TransportState_e prvGetState(void *pvContext)
 {
 	TransportTcpContext_t *pxContext;
@@ -770,6 +890,14 @@ static TransportState_e prvGetState(void *pvContext)
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  返回 Netconn TCP Context 最近一次 LwIP 原生错误。
+ *
+ * @param[in] pvContext TransportTcpContext_t 上下文。
+ *
+ * @retval 最近 err_t 的整数表示；Context 无效时返回 ERR_ARG。
+ */
 static int32_t prvGetNativeError(void *pvContext)
 {
 	TransportTcpContext_t *pxContext;
@@ -782,6 +910,16 @@ static int32_t prvGetNativeError(void *pvContext)
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  关闭并删除当前活动 Netconn 会话。
+ *
+ * @details
+ * 在释放连接前先删除 pxRxBuffer 并复位接收偏移，确保缓存数据不会跨连接残留。
+ * Listener 不在这里关闭，因此 Server 可以结束一个客户端会话后继续监听。
+ *
+ * @param[in,out] pxContext TCP Context。
+ */
 static void prvCloseConnection(TransportTcpContext_t *pxContext)
 {
 	prvDeleteNetbuf(pxContext);
@@ -793,6 +931,12 @@ static void prvCloseConnection(TransportTcpContext_t *pxContext)
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  删除当前缓存 netbuf 并复位流内读取偏移。
+ *
+ * @param[in,out] pxContext TCP Context。
+ */
 static void prvDeleteNetbuf(TransportTcpContext_t *pxContext)
 {
 	if (pxContext->pxRxBuffer != NULL) {
@@ -802,8 +946,19 @@ static void prvDeleteNetbuf(TransportTcpContext_t *pxContext)
 	pxContext->usRxOffset = 0U;
 }
 
-/* Opens a socket channel only after the listener has attached a descriptor. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  校验已附着 Socket Context 并把会话标记为 OPEN。
+ *
+ * @details
+ * 该后端的 socket 描述符由外部 Listener/accept 流程提供；xOpen() 本身不创建 socket。
+ * lSocket < 0 时保持 CLOSED 并返回 NOT_OPEN。
+ *
+ * @param[in,out] pvContext TransportTcpSocketContext_t 上下文。
+ *
+ * @retval TransportResult_e 打开校验结果。
+ */
 static TransportResult_e prvSocketOpen(void *pvContext)
 {
 	TransportTcpSocketContext_t *pxContext;
@@ -820,8 +975,19 @@ static TransportResult_e prvSocketOpen(void *pvContext)
 	return TRANSPORT_RESULT_OK;
 }
 
-/* Closes one accepted socket and returns its fixed slot to the listener. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  关闭并解除当前已接受的 Socket 描述符。
+ *
+ * @details
+ * 先把 Context 中 lSocket 置为 -1、状态置 CLOSED，再对旧描述符执行 shutdown/close。
+ * 因而固定 Channel/Context 可以继续保留，之后重新附着新的客户端 socket。
+ *
+ * @param[in,out] pvContext TransportTcpSocketContext_t 上下文。
+ *
+ * @retval TransportResult_e 关闭结果。
+ */
 static TransportResult_e prvSocketClose(void *pvContext)
 {
 	TransportTcpSocketContext_t *pxContext;
@@ -848,8 +1014,24 @@ static TransportResult_e prvSocketClose(void *pvContext)
 	return prvMapSocketError(errno);
 }
 
-/* Sends a complete Modbus response through one nonblocking client socket. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  在总截止时间内通过非阻塞 Socket 完整发送一段数据。
+ *
+ * @details
+ * lwip_send(MSG_DONTWAIT) 可能短写或返回 EWOULDBLOCK/EAGAIN，因此使用 usOffset 累计进度。
+ * 暂时不可写时只等待 1 Tick 并检查自函数入口起的总时间；连接被关闭或发生其它 errno 时
+ * 立即映射为 TransportResult_e。成功返回前保证 pusSentLen == usDataLen。
+ *
+ * @param[in,out] pvContext    Socket Context。
+ * @param[in]     pucData      待发送数据。
+ * @param[in]     usDataLen    总字节数。
+ * @param[out]    pusSentLen   实际累计发送字节数。
+ * @param[in]     ulTimeoutMs  总发送超时。
+ *
+ * @retval TransportResult_e 发送结果。
+ */
 static TransportResult_e prvSocketSend(void *pvContext,
 	const uint8_t *pucData, uint16_t usDataLen, uint16_t *pusSentLen,
 	uint32_t ulTimeoutMs)
@@ -900,8 +1082,24 @@ static TransportResult_e prvSocketSend(void *pvContext,
 	return TRANSPORT_RESULT_OK;
 }
 
-/* Receives currently available bytes without blocking another client slot. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  从已接受的非阻塞 Socket 读取当前可用字节。
+ *
+ * @details
+ * 当前实现固定使用 MSG_DONTWAIT，并不在本函数内部消费 ulTimeoutMs。没有数据且 errno 为
+ * EWOULDBLOCK/EAGAIN 时返回 TIMEOUT，由上层 ReceiveExact 的总截止时间循环负责重试。
+ * recv 返回 0 视为对端断开，并把 Context 状态置为 ERROR。
+ *
+ * @param[in,out] pvContext       Socket Context。
+ * @param[out]    pucData         接收缓冲区。
+ * @param[in]     usMaxLen        最大读取长度。
+ * @param[out]    pusReceivedLen  实际读取长度。
+ * @param[in]     ulTimeoutMs     当前实现不直接使用，由上层总预算负责约束。
+ *
+ * @retval TransportResult_e 接收结果。
+ */
 static TransportResult_e prvSocketReceive(void *pvContext,
 	uint8_t *pucData, uint16_t usMaxLen, uint16_t *pusReceivedLen,
 	uint32_t ulTimeoutMs)
@@ -909,6 +1107,7 @@ static TransportResult_e prvSocketReceive(void *pvContext,
 	TransportTcpSocketContext_t *pxContext;
 	int lReceived;
 
+	/* Socket 后端自身固定非阻塞；整体 timeout 由上层 ReceiveExact 循环控制。 */
 	(void)ulTimeoutMs;
 	pxContext = (TransportTcpSocketContext_t *)pvContext;
 	if ((pxContext == NULL) || (pucData == NULL) ||
@@ -940,8 +1139,21 @@ static TransportResult_e prvSocketReceive(void *pvContext,
 	return prvMapSocketError(errno);
 }
 
-/* Resets an accepted socket without changing the fixed channel allocation. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  对固定 Socket 会话执行连接重置。
+ *
+ * @details
+ * 当前仅支持 CONNECTION_RESET。若描述符有效，先设置 SO_LINGER={1,0} 请求立即复位连接，
+ * 随后复用 prvSocketClose() 完成关闭并清除 Context 中的描述符。
+ *
+ * @param[in,out] pvContext  Socket Context。
+ * @param[in]     xCommand   控制命令。
+ * @param[in,out] pvArgument 当前实现未使用。
+ *
+ * @retval TransportResult_e 控制结果。
+ */
 static TransportResult_e prvSocketControl(void *pvContext,
 	TransportControl_e xCommand, void *pvArgument)
 {
@@ -966,6 +1178,14 @@ static TransportResult_e prvSocketControl(void *pvContext,
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  返回固定 Socket 会话当前状态。
+ *
+ * @param[in] pvContext Socket Context。
+ *
+ * @retval TransportState_e 当前状态；Context 无效时返回 UNINITIALIZED。
+ */
 static TransportState_e prvSocketGetState(void *pvContext)
 {
 	TransportTcpSocketContext_t *pxContext;
@@ -976,6 +1196,14 @@ static TransportState_e prvSocketGetState(void *pvContext)
 }
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  返回固定 Socket 会话最近一次 errno。
+ *
+ * @param[in] pvContext Socket Context。
+ *
+ * @retval 最近 errno；Context 无效时返回 EINVAL。
+ */
 static int32_t prvSocketGetNativeError(void *pvContext)
 {
 	TransportTcpSocketContext_t *pxContext;
@@ -984,8 +1212,19 @@ static int32_t prvSocketGetNativeError(void *pvContext)
 	return (pxContext != NULL) ? pxContext->lLastNativeError : EINVAL;
 }
 
-/* Maps socket errno values into the same backend-neutral Transport results. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  将 Socket errno 映射到稳定的 TransportResult_e 错误域。
+ *
+ * @details
+ * 把“暂时不可读写/超时”“连接断开”“资源不足”“网络未就绪”等平台错误归并成
+ * 上层可稳定处理的 Transport 结果，使协议层不需要依赖具体 errno 数值。
+ *
+ * @param[in] lError Socket errno。
+ *
+ * @retval TransportResult_e 规范化结果。
+ */
 static TransportResult_e prvMapSocketError(int lError)
 {
 	switch (lError) {
@@ -1014,8 +1253,19 @@ static TransportResult_e prvMapSocketError(int lError)
 	}
 }
 
-/* Converts LwIP err_t values into stable errors used by protocol code. */
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief  将 LwIP err_t 映射到稳定的 TransportResult_e 错误域。
+ *
+ * @details
+ * 该映射把 Netconn 后端的超时、资源、忙、断开和网络未就绪语义统一到公共 Transport
+ * 枚举，与 Socket 后端对上层暴露同一错误模型。
+ *
+ * @param[in] xError LwIP err_t。
+ *
+ * @retval TransportResult_e 规范化结果。
+ */
 static TransportResult_e prvMapLwipError(err_t xError)
 {
 	switch (xError) {

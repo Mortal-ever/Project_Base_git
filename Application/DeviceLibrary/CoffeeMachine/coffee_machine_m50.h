@@ -18,6 +18,7 @@ extern "C" {
 
 #define COFFEE_MACHINE_M50_DEFAULT_UNIT_ID 1U
 #define COFFEE_MACHINE_M50_STATUS_CAPACITY 16U
+#define COFFEE_MACHINE_M50_POLL_MISS_LIMIT 3U
 
 typedef enum {
     COFFEE_MACHINE_M50_ACTION_REFRESH = 0,
@@ -30,6 +31,10 @@ typedef enum {
 typedef struct {
     uint16_t ausStatus[COFFEE_MACHINE_M50_STATUS_CAPACITY];
 } CoffeeMachineM50Image_t;
+
+typedef void (*CoffeeMachineM50StatusCallback_t)(
+    const CoffeeMachineM50Image_t *pxImage, ModbusPortResult_e xResult,
+    uint8_t ucConsecutiveMisses, const void *pvContext);
 
 typedef struct {
     uint16_t usStatusStart;
@@ -48,7 +53,9 @@ ModbusPortResult_e xCoffeeMachineM50Execute(
     const CoffeeMachineM50Config_t *pxConfig, ModbusPort_t *pxPort,
     uint8_t ucUnitId, CoffeeMachineM50Action_e xAction,
     uint16_t usParameter, uint32_t ulTimeoutMs,
-    CoffeeMachineM50Image_t *pxImage, DeviceCancelCheck_t pxCancelCheck,
+    CoffeeMachineM50Image_t *pxImage,
+    CoffeeMachineM50StatusCallback_t pxStatusCallback,
+    const void *pvStatusContext, DeviceCancelCheck_t pxCancelCheck,
     const void *pvCancelContext);
 
 #ifdef __cplusplus

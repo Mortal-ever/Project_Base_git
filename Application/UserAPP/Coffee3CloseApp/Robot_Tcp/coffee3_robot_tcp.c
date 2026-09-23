@@ -313,6 +313,8 @@ typedef struct {
 	uint8_t ucCommandWriteConfirmed;
 	uint8_t ucCompletionObserved;
 	uint8_t ucPrepareRetryCount;
+	uint8_t ucOverdue;
+	uint8_t ucOverdueLogged;
 	uint8_t ucTerminalLogged;
 	int32_t lTerminalResult;
 	Coffee3RobotPhase_e xPhase;
@@ -413,6 +415,9 @@ static ModbusPortResult_e prvSchedulePrepareRetry(
 	ModbusPortResult_e xFailure);
 static void prvArchiveAndResetTransaction(
 	Coffee3RobotTransaction_t *pxTransaction, int32_t lTerminalResult);
+static uint8_t prvRobotDebugMotion(const Coffee3Command_t *pxCommand);
+static void prvMarkActionOverdue(Coffee3RobotTransaction_t *pxTransaction,
+	const char *pcReason);
 static uint8_t prvRobotOperational(void);
 static uint8_t prvRobotStrictReady(void);
 static ModbusPortResult_e prvClearActionCoils(ModbusPort_t *pxPort,
@@ -613,7 +618,7 @@ BaseType_t xCoffee3RobotTcpInitialize(void)
 /*-----------------------------------------------------------*/
 BaseType_t xCoffee3RobotTcpSubmitManualMotion(Coffee3Command_t *pxCommand)
 {
-	BaseType_t xResult;
+	uint16_t usPreviousAction;
 
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucDeviceId != (uint8_t)COFFEE3_DEVICE_ROBOT) ||
@@ -621,9 +626,22 @@ BaseType_t xCoffee3RobotTcpSubmitManualMotion(Coffee3Command_t *pxCommand)
 		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) == 0U)) {
 		return pdFAIL;
 	}
-	/* Claim first so concurrent Server writes cannot both acquire a workflow
-	 * reservation. The Robot task only consumes state 1. */
+	usPreviousAction = 0U;
+	/* A pending debug command is a latest-value slot, not a FIFO. Replacing it
+	 * reuses the existing workflow reservation. */
 	taskENTER_CRITICAL();
+	if (s_ucManualMotionPending == 1U) {
+		usPreviousAction = s_xManualMotionPending.usAction;
+		pxCommand->ucFlags |= COFFEE3_COMMAND_FLAG_MANUAL_RESERVED;
+		s_xManualMotionPending = *pxCommand;
+		taskEXIT_CRITICAL();
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
+			COFFEE3_LOG_SOURCE_SERVER, COFFEE3_LOG_ORDER_DEBUG,
+			"Debug pending replaced: device=Robot previous=%s next=%s",
+			prvRobotActionName(usPreviousAction),
+			prvRobotActionName(pxCommand->usAction));
+		return pdPASS;
+	}
 	if (s_ucManualMotionPending != 0U) {
 		taskEXIT_CRITICAL();
 		return pdFAIL;
@@ -641,8 +659,7 @@ BaseType_t xCoffee3RobotTcpSubmitManualMotion(Coffee3Command_t *pxCommand)
 	s_xManualMotionPending = *pxCommand;
 	s_ucManualMotionPending = 1U;
 	taskEXIT_CRITICAL();
-	xResult = pdPASS;
-	return xResult;
+	return pdPASS;
 }
 
 /*-----------------------------------------------------------*/
@@ -818,38 +835,21 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 		}
 		xCommandReceived = pdFAIL;
 		ucSessionCommandPending = 0U;
-		/* Absolute motion/acceptance budgets also run while TCP is offline. */
+		/* Elapsed budgets are diagnostic only. Host cancellation remains the
+		 * authority for abandoning an order motion. */
 		if ((xTransaction.ucActive != 0U) &&
 			(xTransaction.ucCommandWriteAttempted != 0U) &&
 			((int32_t)(xTaskGetTickCount() -
 				((xTransaction.ucAccepted != 0U) ?
 				 xTransaction.xMotionDeadline : xTransaction.xAcceptDeadline)) >= 0)) {
-			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_ROBOT, (uint16_t)xTransaction.xCommand.ulOrderId,
-			"Robot timeout: action=%u command=%lu accepted=%u; inspect before recovery",
-				xTransaction.xCommand.usAction,
-				(unsigned long)xTransaction.xCommand.ulCommandId,
-				xTransaction.ucAccepted);
-			vCoffee3DeviceCommandCompleted(&xTransaction.xCommand,
-				MODBUS_PORT_RESULT_TIMEOUT, 1U);
-			prvArchiveAndResetTransaction(&xTransaction, MODBUS_PORT_RESULT_TIMEOUT);
+			prvMarkActionOverdue(&xTransaction,
+				(xTransaction.ucAccepted != 0U) ? "motion" : "accept");
 		}
 		if ((xTransaction.ucActive != 0U) &&
 			(xTransaction.xRecoveryStart != 0U) &&
 			((xTaskGetTickCount() - xTransaction.xRecoveryStart) >=
 				pdMS_TO_TICKS(COFFEE3_ROBOT_RECOVERY_TIMEOUT_MS))) {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_ROBOT,
-				(uint16_t)xTransaction.xCommand.ulOrderId,
-				"ROBOT_RECOVERY_TIMEOUT", MODBUS_PORT_RESULT_TIMEOUT,
-				"command_id", (int32_t)
-					xTransaction.xCommand.ulCommandId);
-			vCoffee3DeviceSetRecovering(COFFEE3_DEVICE_ROBOT, 0U);
-			vCoffee3DeviceCommandCompleted(&xTransaction.xCommand,
-				MODBUS_PORT_RESULT_TIMEOUT, 1U);
-			prvArchiveAndResetTransaction(&xTransaction,
-				MODBUS_PORT_RESULT_TIMEOUT);
-			ucRecoveryWaitingLogged = 0U;
+			prvMarkActionOverdue(&xTransaction, "recovery");
 		}
 		if ((xTransaction.ucActive != 0U) &&
 			(xTransaction.xRecoveryStart != 0U)) {
@@ -1111,6 +1111,23 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 			}
 			continue;
 		}
+		/* Debug motion is deliberately replaceable by the newest engineer
+		 * request. An order-owned motion is never superseded here. */
+		if ((xTransaction.ucActive != 0U) &&
+			(prvRobotDebugMotion(&xTransaction.xCommand) != 0U) &&
+			(prvTakePendingManualMotion(&xCommand) != 0U)) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+				COFFEE3_LOG_SOURCE_ROBOT, COFFEE3_LOG_ORDER_DEBUG,
+				"Debug interrupted: device=Robot previous=%s next=%s",
+				prvRobotActionName(xTransaction.xCommand.usAction),
+				prvRobotActionName(xCommand.usAction));
+			vCoffee3DeviceCommandCompleted(&xTransaction.xCommand,
+				COFFEE3_COMMAND_RESULT_SUPERSEDED, 0U);
+			prvArchiveAndResetTransaction(&xTransaction,
+				COFFEE3_COMMAND_RESULT_SUPERSEDED);
+			xCommandReceived = pdPASS;
+			ucRecoveryWaitingLogged = 0U;
+		}
 		if ((xTransaction.ucActive != 0U) &&
 			(xTransaction.xPhase != COFFEE3_ROBOT_PHASE_IDLE) &&
 			(xTransaction.xRecoveryStart == 0U)) {
@@ -1187,7 +1204,7 @@ void vCoffee3RobotTcpTask(void *pvArgument)
 				"MANUAL_ROBOT_DISPATCH", 0,
 				"action", (int32_t)xCommand.usAction);
 		}
-		if (ucDeferredCommand != 0U) {
+		if ((xCommandReceived == pdFAIL) && (ucDeferredCommand != 0U)) {
 			xCommand = xDeferredCommand;
 			ucDeferredCommand = 0U;
 			xCommandReceived = pdPASS;
@@ -1980,6 +1997,42 @@ static void prvArchiveAndResetTransaction(
 }
 
 /*-----------------------------------------------------------*/
+static uint8_t prvRobotDebugMotion(const Coffee3Command_t *pxCommand)
+{
+	if (pxCommand == NULL) {
+		return 0U;
+	}
+	return ((pxCommand->ucSource ==
+		(uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) &&
+		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) != 0U)) ?
+		1U : 0U;
+}
+
+/*-----------------------------------------------------------*/
+static void prvMarkActionOverdue(Coffee3RobotTransaction_t *pxTransaction,
+	const char *pcReason)
+{
+	const char *pcOwner;
+
+	if ((pxTransaction == NULL) || (pxTransaction->ucActive == 0U)) {
+		return;
+	}
+	pxTransaction->ucOverdue = 1U;
+	if (pxTransaction->ucOverdueLogged != 0U) {
+		return;
+	}
+	pxTransaction->ucOverdueLogged = 1U;
+	pcOwner = (prvRobotDebugMotion(&pxTransaction->xCommand) != 0U) ?
+		"debug" : "order";
+	(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
+		COFFEE3_LOG_SOURCE_ROBOT,
+		(uint16_t)pxTransaction->xCommand.ulOrderId,
+		"Overdue: device=Robot owner=%s action=%s phase=%s; waiting",
+		pcOwner, prvRobotActionName(pxTransaction->xCommand.usAction),
+		(pcReason != NULL) ? pcReason : "deadline");
+}
+
+/*-----------------------------------------------------------*/
 static ModbusPortResult_e prvReconcile(ModbusPort_t *pxPort,
 	Coffee3RobotTransaction_t *pxTransaction,
 	uint8_t *pucDone)
@@ -2357,19 +2410,13 @@ static ModbusPortResult_e prvAdvanceAction(ModbusPort_t *pxPort,
 				(int32_t)pxTransaction->xCommand.usAction);
 		}
 		if ((int32_t)(xNow - pxTransaction->xAcceptDeadline) >= 0) {
-			if (pucActionTimedOut != NULL) {
-				*pucActionTimedOut = 1U;
-			}
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_ROBOT,
-				(uint16_t)pxTransaction->xCommand.ulOrderId,
-				"ROBOT_ACTION_ACCEPT_TIMEOUT", MODBUS_PORT_RESULT_TIMEOUT,
-				"coil", (int32_t)pxTransaction->usCommandCoil);
-			return MODBUS_PORT_RESULT_TIMEOUT;
+			prvMarkActionOverdue(pxTransaction, "accept");
+			return MODBUS_PORT_RESULT_BUSY;
 		}
-		if ((pxTransaction->xLastAcceptLogTick == 0U) ||
+		if ((pxTransaction->ucOverdue == 0U) &&
+			((pxTransaction->xLastAcceptLogTick == 0U) ||
 			((xNow - pxTransaction->xLastAcceptLogTick) >=
-				pdMS_TO_TICKS(COFFEE3_ROBOT_ACCEPT_LOG_INTERVAL_MS))) {
+				pdMS_TO_TICKS(COFFEE3_ROBOT_ACCEPT_LOG_INTERVAL_MS)))) {
 			pxTransaction->xLastAcceptLogTick = xNow;
 			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_ROBOT,
@@ -2400,17 +2447,8 @@ static ModbusPortResult_e prvAdvanceAction(ModbusPort_t *pxPort,
 		}
 		if ((int32_t)(xTaskGetTickCount() -
 			pxTransaction->xMotionDeadline) >= 0) {
-			if (pucActionTimedOut != NULL) {
-				*pucActionTimedOut = 1U;
-			}
-			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
-				COFFEE3_LOG_SOURCE_ROBOT,
-				(uint16_t)pxTransaction->xCommand.ulOrderId,
-				"ROBOT_ACTION_TIMEOUT=%s RESULT=%d",
-				prvRobotActionName(
-					pxTransaction->xCommand.usAction),
-				(int)MODBUS_PORT_RESULT_TIMEOUT);
-			return MODBUS_PORT_RESULT_TIMEOUT;
+			prvMarkActionOverdue(pxTransaction, "motion");
+			return MODBUS_PORT_RESULT_BUSY;
 		}
 		return MODBUS_PORT_RESULT_BUSY;
 	}

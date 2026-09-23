@@ -250,12 +250,6 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 		(pxBinding->ucRouteId >= COFFEE3_ROUTE_COUNT)) {
 		return pdFAIL;
 	}
-	if ((pxBinding->ucRouteId >= 2U) &&
-		(pxBinding->ucRouteId <= 5U)) {
-		/* A queued foreground command wakes the owner and abandons only an
-		 * active background read. The UART remains owned by the bus task. */
-		vCoffee3RtuBusRequestPreempt(pxBinding->ucRouteId);
-	}
 	xQueue = s_axRouteQueues[pxBinding->ucRouteId];
 	if (xQueue == NULL) {
 		return pdFAIL;
@@ -281,7 +275,8 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 		return xCoffee3RobotTcpSubmitManualMotion(pxCommand);
 	}
 	if ((pxCommand->ucSource == COFFEE3_COMMAND_SOURCE_SERVER) &&
-		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) == 0U)) {
+		((pxCommand->ucDeviceId != (uint8_t)COFFEE3_DEVICE_ROBOT) ||
+		 ((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) == 0U))) {
 		if (xCoffee3WorkflowAcquireManual() != pdPASS) {
 			return pdFAIL;
 		}
@@ -308,6 +303,7 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand)
 {
 	Coffee3DeviceStatus_t *pxStatus;
+	const Coffee3DeviceBinding_t *pxBinding;
 	EventGroupHandle_t xEvents;
 	uint8_t ucDeviceId;
 
@@ -317,6 +313,7 @@ void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand)
 		return;
 	}
 	ucDeviceId = pxCommand->ucDeviceId;
+	pxBinding = pxCoffee3DeviceGetBinding((Coffee3DeviceId_e)ucDeviceId);
 	pxStatus = &g_axCoffee3DeviceStatus[ucDeviceId];
 	xEvents = s_axDeviceEvents[ucDeviceId];
 	(void)xEventGroupClearBits(xEvents,
@@ -338,10 +335,11 @@ void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand)
 	(void)xEventGroupSetBits(xEvents, COFFEE3_DEVICE_EVENT_BUSY);
 	if (pxCommand->ucSource ==
 		(uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) {
-		(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
+		(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 			COFFEE3_LOG_SOURCE_SERVER, (uint16_t)pxCommand->ulOrderId,
-			"MANUAL_COMMAND_RUNNING", 0,
-			"action", (int32_t)pxCommand->usAction);
+			"Debug running: device=%s action=%u",
+			(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+			(unsigned int)pxCommand->usAction);
 	}
 }
 
@@ -350,6 +348,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	int32_t lResult, uint8_t ucTimedOut)
 {
 	Coffee3DeviceStatus_t *pxStatus;
+	const Coffee3DeviceBinding_t *pxBinding;
 	EventGroupHandle_t xEvents;
 	EventBits_t xSetBits;
 	uint8_t ucDeviceId;
@@ -361,6 +360,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 		return;
 	}
 	ucDeviceId = pxCommand->ucDeviceId;
+	pxBinding = pxCoffee3DeviceGetBinding((Coffee3DeviceId_e)ucDeviceId);
 	pxStatus = &g_axCoffee3DeviceStatus[ucDeviceId];
 	xEvents = s_axDeviceEvents[ucDeviceId];
 	xSetBits = COFFEE3_DEVICE_EVENT_DATA_UPDATED;
@@ -372,8 +372,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 			COFFEE3_DEVICE_EVENT_COMM_FAULT |
 			COFFEE3_DEVICE_EVENT_DEVICE_FAULT);
 		xSetBits |= COFFEE3_DEVICE_EVENT_ONLINE;
-		if ((ucDeviceId != (uint8_t)COFFEE3_DEVICE_ROBOT) ||
-			(g_axCoffee3DeviceStatus[ucDeviceId].ucReady != 0U)) {
+		if (g_axCoffee3DeviceStatus[ucDeviceId].ucReady != 0U) {
 			xSetBits |= COFFEE3_DEVICE_EVENT_READY;
 		} else {
 			(void)xEventGroupClearBits(xEvents,
@@ -457,31 +456,36 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	(void)xEventGroupSetBits(xEvents, xSetBits);
 	if (pxCommand->ucSource ==
 		(uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) {
-		if ((lResult == COFFEE3_COMMAND_RESULT_CANCELED) ||
-			(lResult == COFFEE3_COMMAND_RESULT_SUPERSEDED)) {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_WARNING,
+		if (lResult == COFFEE3_COMMAND_RESULT_SUPERSEDED) {
+			/* The Robot owner logs previous and replacement actions together. */
+		} else if (lResult == COFFEE3_COMMAND_RESULT_CANCELED) {
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_SERVER,
 				(uint16_t)pxCommand->ulOrderId,
-				"MANUAL_COMMAND_CANCELED", lResult,
-				"action", (int32_t)pxCommand->usAction);
+				"Debug canceled: device=%s action=%u result=%ld",
+				(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+				(unsigned int)pxCommand->usAction, (long)lResult);
 		} else if (ucTimedOut != 0U) {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_ERROR,
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
 				COFFEE3_LOG_SOURCE_SERVER,
 				(uint16_t)pxCommand->ulOrderId,
-				"MANUAL_COMMAND_TIMEOUT", lResult,
-				"action", (int32_t)pxCommand->usAction);
+				"Debug timeout: device=%s action=%u result=%ld",
+				(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+				(unsigned int)pxCommand->usAction, (long)lResult);
 		} else if (lResult == 0) {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_INFO,
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_INFO,
 				COFFEE3_LOG_SOURCE_SERVER,
 				(uint16_t)pxCommand->ulOrderId,
-				"MANUAL_COMMAND_COMPLETED", lResult,
-				"action", (int32_t)pxCommand->usAction);
+				"Debug complete: device=%s action=%u",
+				(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+				(unsigned int)pxCommand->usAction);
 		} else {
-			(void)xCoffee3LogWriteFieldOrder(COFFEE3_LOG_LEVEL_ERROR,
+			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_ERROR,
 				COFFEE3_LOG_SOURCE_SERVER,
 				(uint16_t)pxCommand->ulOrderId,
-				"MANUAL_COMMAND_FAILED", lResult,
-				"action", (int32_t)pxCommand->usAction);
+				"Debug failed: device=%s action=%u result=%ld",
+				(pxBinding != NULL) ? pxBinding->pcName : "Unknown",
+				(unsigned int)pxCommand->usAction, (long)lResult);
 		}
 	}
 }
@@ -571,8 +575,7 @@ void vCoffee3DeviceSetOnline(Coffee3DeviceId_e xDeviceId,
 		(void)xEventGroupClearBits(xEvents,
 			COFFEE3_DEVICE_EVENT_COMM_FAULT);
 		(void)xEventGroupSetBits(xEvents, COFFEE3_DEVICE_EVENT_ONLINE);
-		if ((xDeviceId != COFFEE3_DEVICE_ROBOT) ||
-			(g_axCoffee3DeviceStatus[xDeviceId].ucReady != 0U)) {
+		if (g_axCoffee3DeviceStatus[xDeviceId].ucReady != 0U) {
 			(void)xEventGroupSetBits(xEvents,
 				COFFEE3_DEVICE_EVENT_READY);
 		} else {

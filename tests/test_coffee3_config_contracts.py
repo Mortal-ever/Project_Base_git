@@ -183,6 +183,55 @@ class ConfigContracts(unittest.TestCase):
         self.assertIn('aucMB1XPin[ucIndex] == 0U', code)
         self.assertIn('ucIndex < 2U', code)
 
+    def test_m50_foreground_make_owns_status_and_shared_timeout(self):
+        settings = read(APP / 'Config/coffee3_app_config.h')
+        server = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
+        bus = read(APP / 'Modbus_Rtu_Bus/coffee3_rtu_bus.c')
+        device = read(APP / 'Device/coffee3_device.c')
+        driver = read(
+            ROOT / 'Application/DeviceLibrary/CoffeeMachine/coffee_machine_m50.c')
+        driver_header = read(
+            ROOT / 'Application/DeviceLibrary/CoffeeMachine/coffee_machine_m50.h')
+        make = driver[driver.index(
+            'if (xAction == COFFEE_MACHINE_M50_ACTION_MAKE)'):
+            driver.index('if (xAction == COFFEE_MACHINE_M50_ACTION_CLEAN)')]
+        self.assertIn('COFFEE3_COFFEE_ACTION_TIMEOUT_MS      180000U', settings)
+        self.assertIn('xCommand.ulTimeoutMs = COFFEE3_COFFEE_ACTION_TIMEOUT_MS;',
+                      server)
+        self.assertIn('COFFEE_MACHINE_M50_POLL_MISS_LIMIT 3U', driver_header)
+        self.assertLess(make.index('prvReadMakeStatus('),
+                        make.index('xModbusPortWriteRegister('))
+        self.assertEqual(make.count('pxConfig->usMakeRegister'), 1)
+        self.assertIn('vCoffee3DeviceImageCommitM50(pxImage)', bus)
+        self.assertIn('Coffee state changed: device=%s', bus)
+        self.assertIn(
+            'pxCommand->ucDeviceId != (uint8_t)COFFEE3_DEVICE_ROBOT',
+            device)
+
+    def test_closed_pickup_uses_host_gate_and_physical_cup(self):
+        server = read(APP / 'Modbus_Tcp_Server/coffee3_server.c')
+        workflow = read(APP / 'WorkFlow/coffee3_workflow.c')
+        evaluate = server[server.index(
+            'static void prvEvaluateManualCommands(uint16_t usAddress,\n'
+            '\tuint16_t usQuantity)\n{'):
+            server.index('static void prvLogCompatibilityWrites',
+                         server.index(
+                             'static void prvEvaluateManualCommands(uint16_t usAddress,\n'
+                             '\tuint16_t usQuantity)\n{'))]
+        pickup = workflow[workflow.index(
+            'static int32_t prvRunStoragePickup(uint16_t usStorage)\n{'):]
+        self.assertIn('COFFEE3_REG_ORDER_PRESENT', evaluate)
+        self.assertIn('usOutput != 1U', evaluate)
+        self.assertIn('xCoffee3WorkflowSubmitStoragePickup(usStorage,',
+                      evaluate)
+        self.assertLess(pickup.index('usCoffee3ServerGetCommandRegister('),
+                        pickup.index('prvRunStep(800U'))
+        self.assertIn('aucMB1XPin[usStorage - 1U] == 0U', pickup)
+        self.assertNotIn('s_ausStoredOrderId[usStorage - 1U] == 0U', pickup)
+        self.assertLess(pickup.index('COFFEE3_ACTION_ROBOT_TAKE_STORAGE'),
+                        pickup.index('COFFEE3_ACTION_ROBOT_PUT_OUTPUT'))
+        self.assertIn('prvStartDoor(2U)', pickup)
+
     def test_flash_bounds_and_commit_last(self):
         header = read(ROOT / 'Application/Common/ConfigStore/config_store.h')
         code = read(ROOT / 'Application/Common/ConfigStore/config_store.c')

@@ -77,9 +77,6 @@ const Coffee3RtuBusConfig_t *pxCoffee3RtuBusGetConfig(uint8_t ucIndex);
   */
 void vCoffee3RtuBusTask(void *pvArgument);
 
-/** @brief Notify a bus owner that a foreground command must preempt polling. */
-void vCoffee3RtuBusRequestPreempt(uint8_t ucBusId);
-
 #ifdef __cplusplus
 }
 #endif

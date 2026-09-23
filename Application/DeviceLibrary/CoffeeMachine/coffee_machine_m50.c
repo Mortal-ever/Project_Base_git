@@ -35,17 +35,67 @@ static ModbusPortResult_e prvRefresh(const CoffeeMachineM50Config_t *pxConfig,
         pxConfig->usStatusCount, pxImage->ausStatus, ulTimeoutMs);
 }
 
+static uint8_t prvTransientStatusFailure(ModbusPortResult_e xResult)
+{
+    return ((xResult == MODBUS_PORT_RESULT_TIMEOUT) ||
+        (xResult == MODBUS_PORT_RESULT_TRANSPORT) ||
+        (xResult == MODBUS_PORT_RESULT_PROTOCOL)) ? 1U : 0U;
+}
+
+static ModbusPortResult_e prvReadMakeStatus(
+    const CoffeeMachineM50Config_t *pxConfig, ModbusPort_t *pxPort,
+    uint8_t ucUnitId, uint32_t ulTransactionMs,
+    CoffeeMachineM50Image_t *pxImage,
+    CoffeeMachineM50StatusCallback_t pxStatusCallback,
+    const void *pvStatusContext, DeviceCancelCheck_t pxCancelCheck,
+    const void *pvCancelContext)
+{
+    ModbusPortResult_e xResult;
+    uint8_t ucMisses;
+
+    ucMisses = 0U;
+    for (;;) {
+        if ((pxCancelCheck != NULL) &&
+            (pxCancelCheck(pvCancelContext) != 0U)) {
+            return MODBUS_PORT_RESULT_CANCELED;
+        }
+        xResult = prvRefresh(pxConfig, pxPort, ucUnitId,
+            ulTransactionMs, pxImage);
+        if (xResult == MODBUS_PORT_RESULT_OK) {
+            if (pxStatusCallback != NULL) {
+                pxStatusCallback(pxImage, xResult, 0U, pvStatusContext);
+            }
+            return xResult;
+        }
+        if (prvTransientStatusFailure(xResult) == 0U) {
+            return xResult;
+        }
+        ucMisses++;
+        if (pxStatusCallback != NULL) {
+            pxStatusCallback(pxImage, xResult, ucMisses, pvStatusContext);
+        }
+        if (ucMisses >= COFFEE_MACHINE_M50_POLL_MISS_LIMIT) {
+            return xResult;
+        }
+        vTaskDelay(pdMS_TO_TICKS(COFFEE_MACHINE_M50_POLL_MS));
+    }
+}
+
 static ModbusPortResult_e prvWaitForIdle(
     const CoffeeMachineM50Config_t *pxConfig, ModbusPort_t *pxPort,
     uint8_t ucUnitId, uint32_t ulTimeoutMs, CoffeeMachineM50Image_t *pxImage,
-    DeviceCancelCheck_t pxCancelCheck, const void *pvCancelContext)
+    CoffeeMachineM50StatusCallback_t pxStatusCallback,
+    const void *pvStatusContext, DeviceCancelCheck_t pxCancelCheck,
+    const void *pvCancelContext)
 {
     ModbusPortResult_e xResult;
     TickType_t xStart;
+    uint8_t ucMisses;
     uint8_t ucObservedWorking;
     uint32_t ulTransactionMs;
 
     xStart = xTaskGetTickCount();
+    ucMisses = 0U;
     ucObservedWorking = 0U;
     for (;;) {
         if ((pxCancelCheck != NULL) &&
@@ -63,12 +113,27 @@ static ModbusPortResult_e prvWaitForIdle(
         xResult = prvRefresh(pxConfig, pxPort, ucUnitId,
             ulTransactionMs, pxImage);
         if (xResult != MODBUS_PORT_RESULT_OK) {
-            return xResult;
-        }
-        if (pxImage->ausStatus[0U] != pxConfig->usIdleValue) {
-            ucObservedWorking = 1U;
-        } else if (ucObservedWorking != 0U) {
-            return MODBUS_PORT_RESULT_OK;
+            if (prvTransientStatusFailure(xResult) == 0U) {
+                return xResult;
+            }
+            ucMisses++;
+            if (pxStatusCallback != NULL) {
+                pxStatusCallback(pxImage, xResult, ucMisses,
+                    pvStatusContext);
+            }
+            if (ucMisses >= COFFEE_MACHINE_M50_POLL_MISS_LIMIT) {
+                return xResult;
+            }
+        } else {
+            ucMisses = 0U;
+            if (pxStatusCallback != NULL) {
+                pxStatusCallback(pxImage, xResult, 0U, pvStatusContext);
+            }
+            if (pxImage->ausStatus[0U] != pxConfig->usIdleValue) {
+                ucObservedWorking = 1U;
+            } else if (ucObservedWorking != 0U) {
+                return MODBUS_PORT_RESULT_OK;
+            }
         }
         if ((xTaskGetTickCount() - xStart) >= pdMS_TO_TICKS(ulTimeoutMs)) {
             return MODBUS_PORT_RESULT_TIMEOUT;
@@ -81,7 +146,9 @@ ModbusPortResult_e xCoffeeMachineM50Execute(
     const CoffeeMachineM50Config_t *pxConfig, ModbusPort_t *pxPort,
     uint8_t ucUnitId, CoffeeMachineM50Action_e xAction, uint16_t usParameter,
     uint32_t ulTimeoutMs, CoffeeMachineM50Image_t *pxImage,
-    DeviceCancelCheck_t pxCancelCheck, const void *pvCancelContext)
+    CoffeeMachineM50StatusCallback_t pxStatusCallback,
+    const void *pvStatusContext, DeviceCancelCheck_t pxCancelCheck,
+    const void *pvCancelContext)
 {
     ModbusPortResult_e xResult;
     uint32_t ulTransactionMs;
@@ -98,16 +165,32 @@ ModbusPortResult_e xCoffeeMachineM50Execute(
     ulTransactionMs = (ulTimeoutMs > COFFEE_MACHINE_M50_TRANSACTION_MS) ?
         COFFEE_MACHINE_M50_TRANSACTION_MS : ulTimeoutMs;
     if (xAction == COFFEE_MACHINE_M50_ACTION_REFRESH) {
-        return prvRefresh(pxConfig, pxPort, ucUnitId, ulTimeoutMs, pxImage);
+        xResult = prvRefresh(pxConfig, pxPort, ucUnitId,
+            ulTransactionMs, pxImage);
+        if ((xResult == MODBUS_PORT_RESULT_OK) &&
+            (pxStatusCallback != NULL)) {
+            pxStatusCallback(pxImage, xResult, 0U, pvStatusContext);
+        }
+        return xResult;
     }
     if (xAction == COFFEE_MACHINE_M50_ACTION_MAKE) {
+        xResult = prvReadMakeStatus(pxConfig, pxPort, ucUnitId,
+            ulTransactionMs, pxImage, pxStatusCallback, pvStatusContext,
+            pxCancelCheck, pvCancelContext);
+        if (xResult != MODBUS_PORT_RESULT_OK) {
+            return xResult;
+        }
+        if (pxImage->ausStatus[0U] != pxConfig->usIdleValue) {
+            return MODBUS_PORT_RESULT_BUSY;
+        }
         xResult = xModbusPortWriteRegister(pxPort, ucUnitId,
             pxConfig->usMakeRegister, usParameter, ulTransactionMs);
         if (xResult != MODBUS_PORT_RESULT_OK) {
             return xResult;
         }
         return prvWaitForIdle(pxConfig, pxPort, ucUnitId, ulTimeoutMs,
-            pxImage, pxCancelCheck, pvCancelContext);
+            pxImage, pxStatusCallback, pvStatusContext,
+            pxCancelCheck, pvCancelContext);
     }
     if (xAction == COFFEE_MACHINE_M50_ACTION_CLEAN) {
         return xModbusPortWriteRegister(pxPort, ucUnitId,

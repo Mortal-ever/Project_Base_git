@@ -95,7 +95,7 @@ extern Coffee3WorkflowStatus_t g_xCoffee3WorkflowStatus;
 
 /** @brief Reserve manual access until the submitted command terminates. */
 BaseType_t xCoffee3WorkflowAcquireManual(void);
-/** @brief Reserve one debug Robot motion until the current business releases Robot ownership. */
+/** @brief Reserve the latest debug Robot motion until Robot ownership is free. */
 BaseType_t xCoffee3WorkflowAcquireDeferredManual(void);
 /** @brief Release one successful manual reservation in task context. */
 void vCoffee3WorkflowReleaseManual(void);
@@ -110,7 +110,8 @@ void vCoffee3WorkflowConfirmPickup(uint16_t usOutput);
 /** @brief Queue door 0=stop, 1=close/up, or 2=open/down for the owner. */
 BaseType_t xCoffee3WorkflowSubmitDoorDebug(uint8_t ucDirection);
 /** @brief Reserve one storage-to-outlet transfer for the Workflow owner. */
-BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage);
+BaseType_t xCoffee3WorkflowSubmitStoragePickup(uint16_t usStorage,
+	uint16_t usOutput);
 
 /**
   * @brief Create the bounded static order queue.
