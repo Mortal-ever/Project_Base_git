@@ -1,8 +1,8 @@
 /**
   * @file      coffee3_server.c
-  * @brief     Implement the Coffee3 multi-slot Modbus TCP server and model.
+  * @brief     实现 Coffee3 多客户端 Modbus TCP 服务与寄存器模型。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   */
 
 #include "coffee3_server.h"
@@ -31,19 +31,22 @@
 #include "task.h"
 #include "transport_tcp.h"
 
-/** @brief Monitoring block base address. */
+/** @brief 私有监控寄存器区的起始地址。 */
 #define COFFEE3_SERVER_DEBUG_BASE             0x1100U
-/** @brief Upgrade command register base and count. */
+/** @brief 兼容升级控制寄存器区的起始地址。 */
 #define COFFEE3_SERVER_UPGRADE_BASE           0x0200U
+/** @brief 兼容升级控制寄存器的数量。 */
 #define COFFEE3_SERVER_UPGRADE_COUNT          3U
-/** @brief Delay a requested software reset until the Modbus reply can leave. */
+/** @brief 发出 Modbus 应答后等待软件复位的时间，单位为毫秒。 */
 #define COFFEE3_SERVER_OTA_RESET_DELAY_MS      50U
-/** @brief Maximum connection event text kept on the Server task stack. */
+/** @brief 服务任务栈上连接事件文本缓冲区的字节数。 */
 #define COFFEE3_SERVER_CONNECTION_EVENT_LENGTH 64U
-/** @brief Removed IO debug command hole; writes are rejected. */
+/** @brief 已移除 IO 调试寄存器区的首地址，写入该区间会被拒绝。 */
 #define COFFEE3_SERVER_REMOVED_IO_DEBUG_FIRST  0x0084U
+/** @brief 已移除 IO 调试寄存器区的末地址。 */
 #define COFFEE3_SERVER_REMOVED_IO_DEBUG_LAST   0x0086U
 
+/** @brief 需要记录兼容行为的命令寄存器地址表。 */
 static const uint16_t s_ausCompatibilityLogAddresses[] = {
 	0x001FU,
 	COFFEE3_REG_WATER_BUCKET_ENABLE,
@@ -61,117 +64,55 @@ static const uint16_t s_ausCompatibilityLogAddresses[] = {
 	COFFEE3_REG_ICE_MACHINE_TYPE,
 	0x00AAU, 0x00ABU, 0x00ACU, 0x00ADU, 0x00AEU, 0x00AFU
 };
+/** @brief 兼容行为地址表的元素数量。 */
 #define COFFEE3_COMPATIBILITY_LOG_COUNT \
 	(sizeof(s_ausCompatibilityLogAddresses) / \
 	 sizeof(s_ausCompatibilityLogAddresses[0]))
 
-/** @brief Reusable resources for one accepted socket slot. */
+/** @brief 保存一个已接入客户端槽位可复用的传输与协议资源。 */
 typedef struct {
-	TransportChannel_t xChannel;
-	TransportTcpSocketContext_t xTransport;
-	ModbusPort_t xPort;
-	uint8_t ucCreated;
-	uint8_t ucActive;
+	TransportChannel_t xChannel; /*!< Modbus 端口使用的传输通道。 */
+	TransportTcpSocketContext_t xTransport; /*!< TCP socket 传输上下文。 */
+	ModbusPort_t xPort; /*!< 绑定该客户端的 Modbus 服务端实例。 */
+	uint8_t ucCreated; /*!< 传输通道已创建，后续连接可复用。 */
+	uint8_t ucActive; /*!< 当前槽位已绑定有效客户端连接。 */
 } Coffee3ServerSlot_t;
 
 COFFEE3_CCM_DATA
-Coffee3ServerStatus_t g_xCoffee3ServerStatus;
+Coffee3ServerStatus_t g_xCoffee3ServerStatus; /*!< 服务端公开运行状态。 */
 
 COFFEE3_CCM_DATA
-static uint16_t s_ausCommandRegisters[COFFEE3_SERVER_COMMAND_COUNT];
+static uint16_t s_ausCommandRegisters[COFFEE3_SERVER_COMMAND_COUNT]; /*!< 主机命令寄存器镜像。 */
 COFFEE3_CCM_DATA
-static uint16_t s_ausStatusRegisters[COFFEE3_SERVER_STATUS_COUNT];
+static uint16_t s_ausStatusRegisters[COFFEE3_SERVER_STATUS_COUNT]; /*!< 主机只读状态寄存器镜像。 */
 COFFEE3_CCM_DATA
-static uint16_t s_ausUpgradeRegisters[COFFEE3_SERVER_UPGRADE_COUNT];
+static uint16_t s_ausUpgradeRegisters[COFFEE3_SERVER_UPGRADE_COUNT]; /*!< 兼容升级控制寄存器镜像。 */
 COFFEE3_CCM_DATA
-static nmbs_callbacks s_xCallbacks;
+static nmbs_callbacks s_xCallbacks; /*!< nanoMODBUS 服务端回调集合。 */
 COFFEE3_CCM_DATA
-static uint8_t s_ucOrderLatched;
-/** @brief Coalesce repeated Modbus write rejections during one OTA session. */
-static uint8_t s_ucOtaRejectLogged;
-/** @brief Defer the legacy 0x0201 reset to the Server owner loop. */
-static uint8_t s_ucOtaResetPending;
+static uint8_t s_ucOrderLatched; /*!< 订单触发已锁存，防止重复入队或重复拒绝。 */
+static uint8_t s_ucOtaRejectLogged; /*!< 当前 OTA 会话已记录写入拒绝。 */
+static uint8_t s_ucOtaResetPending; /*!< 复位请求等待服务任务关闭连接。 */
 static uint16_t s_ausCompatibilityLogValues[
-	COFFEE3_COMPATIBILITY_LOG_COUNT];
+	COFFEE3_COMPATIBILITY_LOG_COUNT]; /*!< 各兼容寄存器最近记录值。 */
 static uint8_t s_aucCompatibilityLogValid[
-	COFFEE3_COMPATIBILITY_LOG_COUNT];
+	COFFEE3_COMPATIBILITY_LOG_COUNT]; /*!< 最近记录值的有效标记。 */
 
-/**
-  * @brief  Log one accepted client with its actual peer IPv4 endpoint.
-  * @param[in] ucSlot Accepted Server slot index.
-  * @param[in] ulIpv4 Peer IPv4 address in host byte order.
-  * @param[in] usPort Peer source port in host byte order.
-  */
 static void prvLogClientConnected(uint8_t ucSlot, uint32_t ulIpv4,
 	uint16_t usPort);
-
-/**
-  * @brief  读取命令区、状态区、监控区或升级镜像寄存器。
-  * @param[in]  usAddress 起始寄存器地址。
-  * @param[in]  usQuantity 连续读取的寄存器数量。
-  * @param[out] pusRegisters nanoMODBUS 提供的寄存器输出缓冲区。
-  * @param[in]  ucUnitId 请求中的 Unit ID。
-  * @param[in]  pvArgument Server 回调上下文，当前实现未使用。
-  * @retval NMBS_ERROR_NONE 读取成功。
-  * @retval 其他 nmbs_error 地址、数量或协议错误。
-  */
 static nmbs_error prvReadHolding(uint16_t usAddress,
 	uint16_t usQuantity, uint16_t *pusRegisters, uint8_t ucUnitId,
 	void *pvArgument);
-/**
-  * @brief  接受一次 FC06 单寄存器写入。
-  * @param[in] usAddress 目标寄存器地址。
-  * @param[in] usValue 要写入的寄存器值。
-  * @param[in] ucUnitId 请求中的 Unit ID。
-  * @param[in] pvArgument Server 回调上下文，当前实现未使用。
-  * @retval NMBS_ERROR_NONE 写入并触发命令评估成功。
-  * @retval 其他 nmbs_error 地址、值或状态错误。
-  */
 static nmbs_error prvWriteSingle(uint16_t usAddress, uint16_t usValue,
 	uint8_t ucUnitId, void *pvArgument);
-/**
-  * @brief  接受一次 FC10 多寄存器写入。
-  * @param[in] usAddress 连续写入的起始地址。
-  * @param[in] usQuantity 写入寄存器数量。
-  * @param[in] pusRegisters nanoMODBUS 提供的输入寄存器数组。
-  * @param[in] ucUnitId 请求中的 Unit ID。
-  * @param[in] pvArgument Server 回调上下文，当前实现未使用。
-  * @retval NMBS_ERROR_NONE 写入并触发命令评估成功。
-  * @retval 其他 nmbs_error 地址、数量或状态错误。
-  */
 static nmbs_error prvWriteMultiple(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters,
 	uint8_t ucUnitId, void *pvArgument);
-/**
-  * @brief  校验并提交一次连续命令空间写入。
-  * @param[in] usAddress 起始命令寄存器地址。
-  * @param[in] usQuantity 连续写入的寄存器数量。
-  * @param[in] pusRegisters 待校验和复制的寄存器数据。
-  * @retval NMBS_ERROR_NONE 写入成功。
-  * @retval 其他 nmbs_error 地址范围或参数错误。
-  */
 static nmbs_error prvCommitWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters);
-/**
-  * @brief  Commit and execute the legacy 0x0200 through 0x0202 controls.
-  * @param[in] usAddress First upgrade register address.
-  * @param[in] usQuantity Number of consecutive registers.
-  * @param[in] pusRegisters Values supplied by nanoMODBUS.
-  * @retval NMBS_ERROR_NONE The controls were accepted.
-  * @retval NMBS_EXCEPTION_SERVER_DEVICE_FAILURE HTTP startup was not queued.
-  */
 static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters);
-/**
-  * @brief  检测原子寄存器提交后是否产生一份已核对的新订单。
-  * @note   只有订单存在且核对寄存器为 1 时才向工作流队列提交。
-  */
 static void prvEvaluateOrder(void);
-/**
-  * @brief  将维护寄存器内容转换为设备标准命令。
-  * @param[in] usAddress 本次写入的起始寄存器地址。
-  * @param[in] usQuantity 本次写入覆盖的寄存器数量。
-  */
 static void prvEvaluateManualCommands(uint16_t usAddress,
 	uint16_t usQuantity);
 static void prvLogCompatibilityWrites(uint16_t usAddress,
@@ -183,61 +124,26 @@ static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters);
 static uint16_t prvReadIoDebugValue(uint16_t usAddress);
-/**
-  * @brief  提交一个非阻塞维护设备命令。
-  * @param[in] xDeviceId 目标逻辑设备。
-  * @param[in] xAction 目标设备动作。
-  * @param[in] usParameter0 动作参数 0。
-  * @param[in] usParameter1 动作参数 1。
-  * @retval 1 命令已进入目标路由队列。
-  * @retval 0 当前工作流忙或队列无法接收命令。
-  */
 static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	Coffee3Action_e xAction, uint16_t usParameter0,
 	uint16_t usParameter1);
-/**
-  * @brief  将协议 0x0031 的位置值映射为 Robot 标准动作。
-  * @param[in] usPosition 上位机写入的位置枚举值。
-  * @retval 1 位置值已转换并提交。
-  * @retval 0 位置未定义、超范围或命令队列不可用。
-  */
 static uint8_t prvSubmitRobotPosition(uint16_t usPosition);
-/**
-  * @brief  按当前任务和设备状态构造 0x1100 监控区。
-  * @param[out] pusDebug 监控寄存器输出数组，容量必须为定义的监控区长度。
-  */
 static void prvBuildDebugRegisters(uint16_t *pusDebug);
-/**
-  * @brief  将实时设备镜像投影到协议规定的 0x1000 状态区。
-  * @note   函数只更新内存镜像，不执行设备通讯。
-  */
 static void prvRefreshStatusRegisters(void);
-/**
-  * @brief  为配置的 Server 端口创建非阻塞监听 socket。
-  * @retval 非负监听 socket 描述符。
-  * @retval -1 创建、绑定或监听失败。
-  */
 static int prvCreateListener(void);
-/**
-  * @brief  关闭并清理一个 Server 客户端槽位。
-  * @param[in,out] pxSlot 槽位 Transport、Modbus 和 socket 资源。
-  * @param[in,out] pxStatus 槽位公开统计状态。
-  * @param[in]     ucSlotIndex 槽位索引，用于日志标识。
-  * @param[in]     lReason 关闭原因或规范化错误码。
-  */
 static void prvCloseSlot(Coffee3ServerSlot_t *pxSlot,
 	Coffee3ServerClientStatus_t *pxStatus, uint8_t ucSlotIndex,
 	int32_t lReason);
-/**
-  * @brief  重新统计活动客户端数量并刷新 Server 在线状态。
-  * @note   任意一个有效槽位连接时 Server 即视为在线。
-  */
 static void prvUpdateActiveClientCount(void);
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  初始化服务状态、寄存器镜像和 nanoMODBUS 回调。
+  * @retval pdPASS 初始化流程完成；当前实现没有失败分支。
+  */
 BaseType_t xCoffee3ServerInitialize(void)
 {
-	uint8_t ucIndex;
+	uint8_t ucIndex; /*!< 持久化果奶系数装载索引。 */
 
 	memset(&g_xCoffee3ServerStatus, 0,
 		sizeof(g_xCoffee3ServerStatus));
@@ -274,14 +180,20 @@ BaseType_t xCoffee3ServerInitialize(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  记录新客户端槽位及其远端 IPv4 端点。
+  * @param[in] ucSlot 客户端槽位索引。
+  * @param[in] ulIpv4 按主机字节序保存的远端 IPv4 地址。
+  * @param[in] usPort 按主机字节序保存的远端端口。
+  */
 static void prvLogClientConnected(uint8_t ucSlot, uint32_t ulIpv4,
 	uint16_t usPort)
 {
-	static const char acPrefix[] = "SERVER_CLIENT_CONNECTED peer=";
-	char acEvent[COFFEE3_SERVER_CONNECTION_EVENT_LENGTH];
-	uint8_t aucIpv4[4];
-	uint16_t usPrefixLength;
-	const char *pcEvent;
+	static const char acPrefix[] = "SERVER_CLIENT_CONNECTED peer="; /*!< 连接事件固定前缀。 */
+	char acEvent[COFFEE3_SERVER_CONNECTION_EVENT_LENGTH]; /*!< 完整连接事件文本。 */
+	uint8_t aucIpv4[4]; /*!< 供格式化函数使用的四段 IPv4 地址。 */
+	uint16_t usPrefixLength; /*!< 固定前缀长度，单位为字节。 */
+	const char *pcEvent; /*!< 最终提交到日志系统的事件文本。 */
 
 	aucIpv4[0] = (uint8_t)(ulIpv4 >> 24);
 	aucIpv4[1] = (uint8_t)(ulIpv4 >> 16);
@@ -302,29 +214,34 @@ static void prvLogClientConnected(uint8_t ucSlot, uint32_t ulIpv4,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  运行 Modbus TCP 监听器并轮询最多四个客户端槽位。
+  * @param[in] pvArgument FreeRTOS 任务参数，当前实现不使用。
+  * @note   每次客户端 Modbus 轮询结束都会累计请求次数，包括错误结果。
+  */
 void vCoffee3ServerTask(void *pvArgument)
 {
 	static const char * const
 		apcSlotNames[COFFEE3_SERVER_MAX_CLIENTS] = {
 		"coffee3_server_slot0", "coffee3_server_slot1",
 		"coffee3_server_slot2", "coffee3_server_slot3"
-	};
-	Coffee3ServerSlot_t axSlots[COFFEE3_SERVER_MAX_CLIENTS];
-	struct sockaddr_in xPeerAddress;
-	socklen_t xPeerLength;
-	fd_set xReadSet;
-	struct timeval xTimeout;
-	TransportResult_e xTransportResult;
-	ModbusPortResult_e xResult;
-	int lListener;
-	int lAcceptedSocket;
-	int lMaximumSocket;
-	int lReady;
-	int32_t lLastListenerError;
-	uint8_t ucIndex;
-	uint8_t ucFreeSlot;
-	uint8_t ucListenerFailureLogged;
-	uint8_t ucStackMarginLogged;
+	}; /*!< 各客户端槽位的传输通道名称。 */
+	Coffee3ServerSlot_t axSlots[COFFEE3_SERVER_MAX_CLIENTS]; /*!< 最多四个可复用客户端槽位。 */
+	struct sockaddr_in xPeerAddress; /*!< accept 返回的远端 IPv4 端点。 */
+	socklen_t xPeerLength; /*!< 远端地址结构长度。 */
+	fd_set xReadSet; /*!< 本轮 select 关注的监听与客户端 socket 集合。 */
+	struct timeval xTimeout; /*!< select 轮询等待时间。 */
+	TransportResult_e xTransportResult; /*!< TCP 传输创建或绑定结果。 */
+	ModbusPortResult_e xResult; /*!< Modbus 端口初始化或轮询结果。 */
+	int lListener; /*!< 非阻塞监听 socket，负值表示尚未建立。 */
+	int lAcceptedSocket; /*!< 本轮 accept 得到的客户端 socket。 */
+	int lMaximumSocket; /*!< select 所需的最大 socket 描述符。 */
+	int lReady; /*!< select 返回的就绪描述符数量或错误。 */
+	int32_t lLastListenerError; /*!< 最近记录的监听 errno，用于日志去重。 */
+	uint8_t ucIndex; /*!< 客户端槽位遍历索引。 */
+	uint8_t ucFreeSlot; /*!< 新连接可占用的槽位索引，最大值表示无空位。 */
+	uint8_t ucListenerFailureLogged; /*!< 当前监听错误已写日志。 */
+	uint8_t ucStackMarginLogged; /*!< 服务任务栈余量已记录一次。 */
 
 	(void)pvArgument;
 	(void)xCoffee3LogWrite(COFFEE3_LOG_LEVEL_INFO,
@@ -344,6 +261,7 @@ void vCoffee3ServerTask(void *pvArgument)
 		"clients", 0);
 
 	for (;;) {
+		/* 步骤 1：关闭 Server 客户端，请求机器人关闭连接，固定延时后复位。 */
 		if (s_ucOtaResetPending != 0U) {
 			if (lListener >= 0) {
 				(void)lwip_close(lListener);
@@ -364,6 +282,7 @@ void vCoffee3ServerTask(void *pvArgument)
 				COFFEE3_LOG_SOURCE_SERVER, "OTA_SOFT_RESET", 0);
 			NVIC_SystemReset();
 		}
+		/* 步骤 2：网络失效时释放监听器与客户端，并等待网络恢复。 */
 		if (ucAppTaskManagerIsNetworkReady() == 0U) {
 			if (lListener >= 0) {
 				(void)lwip_close(lListener);
@@ -385,6 +304,7 @@ void vCoffee3ServerTask(void *pvArgument)
 			vTaskDelay(pdMS_TO_TICKS(100U));
 			continue;
 		}
+		/* 步骤 3：按需创建监听 socket，失败时限频记录并重试。 */
 		if (lListener < 0) {
 			lListener = prvCreateListener();
 			if (lListener < 0) {
@@ -412,6 +332,7 @@ void vCoffee3ServerTask(void *pvArgument)
 				(int32_t)COFFEE3_SERVER_PORT);
 		}
 
+		/* 步骤 4：组合监听器和活动客户端，执行一次非阻塞轮询。 */
 		FD_ZERO(&xReadSet);
 		FD_SET(lListener, &xReadSet);
 		lMaximumSocket = lListener;
@@ -444,6 +365,7 @@ void vCoffee3ServerTask(void *pvArgument)
 			continue;
 		}
 
+		/* 步骤 5：接入新连接，分配空闲槽位并初始化传输与 Modbus。 */
 		if ((lReady > 0) && FD_ISSET(lListener, &xReadSet)) {
 			xPeerLength = (socklen_t)sizeof(xPeerAddress);
 			lAcceptedSocket = lwip_accept(lListener,
@@ -553,6 +475,7 @@ void vCoffee3ServerTask(void *pvArgument)
 			}
 		}
 
+		/* 步骤 6：轮询有数据的客户端，并更新请求、错误和连接状态。 */
 		for (ucIndex = 0U; ucIndex < COFFEE3_SERVER_MAX_CLIENTS;
 			ucIndex++) {
 			if ((axSlots[ucIndex].ucActive == 0U) ||
@@ -601,10 +524,14 @@ void vCoffee3ServerTask(void *pvArgument)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将当前订单字段投影到主机状态寄存器并标记制作中。
+  * @param[in] pxOrder 工作流已接收的订单快照；调用方必须传入有效指针。
+  */
 void vCoffee3ServerPublishOrder(const Coffee3Order_t *pxOrder)
 {
 	taskENTER_CRITICAL();
-	/* Only fields defined by the Coffee3 status protocol are copied. */
+	/* 只复制 Coffee3 状态协议定义的订单字段。 */
 	s_ausStatusRegisters[0x0000U] =
 		pxOrder->ausRegister[COFFEE3_REG_ORDER_NUMBER];
 	s_ausStatusRegisters[0x0001U] =
@@ -637,6 +564,13 @@ void vCoffee3ServerPublishOrder(const Coffee3Order_t *pxOrder)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布订单号、制作状态、当前步骤和最近错误。
+  * @param[in] usOrderId 当前或最近一次订单编号。
+  * @param[in] usProductionStatus 主机协议制作状态，范围为 0 至 3。
+  * @param[in] usStep 当前工作流步骤编号。
+  * @param[in] lError 最近一次工作流结果或错误码。
+  */
 void vCoffee3ServerPublishWorkflow(uint16_t usOrderId,
 	uint16_t usProductionStatus, uint16_t usStep, int32_t lError)
 {
@@ -653,6 +587,11 @@ void vCoffee3ServerPublishWorkflow(uint16_t usOrderId,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  当一号出口进入指定阶段时，在状态镜像中标记该出口。
+  * @param[in] usOutput 出口编号；当前仅接受一号出口。
+  * @param[in] usState 出口状态；当前仅在值为 2 或 5 时更新镜像。
+  */
 void vCoffee3ServerPublishOutput(uint16_t usOutput, uint16_t usState)
 {
 	if (usOutput != 1U) {
@@ -666,9 +605,15 @@ void vCoffee3ServerPublishOutput(uint16_t usOutput, uint16_t usState)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在临界区内读取一个命令寄存器镜像。
+  * @param[in] usAddress 命令区内的寄存器地址。
+  * @retval 0 地址越出命令区。
+  * @retval 其他值 对应命令寄存器当前值。
+  */
 uint16_t usCoffee3ServerGetCommandRegister(uint16_t usAddress)
 {
-	uint16_t usValue;
+	uint16_t usValue; /*!< 临界区内取得的寄存器值。 */
 
 	if (usAddress >= COFFEE3_SERVER_COMMAND_COUNT) {
 		return 0U;
@@ -680,6 +625,10 @@ uint16_t usCoffee3ServerGetCommandRegister(uint16_t usAddress)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  选择机器人取杯使用的一号或二号储存位。
+  * @param[in] usStorage 储存位编号，仅接受 1 或 2。
+  */
 void vCoffee3ServerSelectStorage(uint16_t usStorage)
 {
 	if ((usStorage < 1U) || (usStorage > 2U)) {
@@ -692,6 +641,9 @@ void vCoffee3ServerSelectStorage(uint16_t usStorage)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将机器人取杯目标设置为一号出口。
+  */
 void vCoffee3ServerSelectOutlet(void)
 {
 	taskENTER_CRITICAL();
@@ -701,6 +653,11 @@ void vCoffee3ServerSelectOutlet(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  清除已完成的储存取杯触发或当前订单触发标记。
+  * @param[in] ucStoragePickup 非零清除储存取杯组合，零清除当前订单组合。
+  * @note   订单组合仅在命令订单号仍等于工作流当前订单号时清除。
+  */
 void vCoffee3ServerFinishRequest(uint8_t ucStoragePickup)
 {
 	taskENTER_CRITICAL();
@@ -717,12 +674,23 @@ void vCoffee3ServerFinishRequest(uint8_t ucStoragePickup)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  读取命令区、状态区、监控区、IO 调试区或升级区寄存器。
+  * @param[in] usAddress 起始寄存器地址。
+  * @param[in] usQuantity 连续读取的寄存器数量。
+  * @param[out] pusRegisters nanoMODBUS 提供的输出缓冲区。
+  * @param[in] ucUnitId 请求单元号，当前实现不使用。
+  * @param[in] pvArgument 回调上下文，当前实现不使用。
+  * @retval NMBS_ERROR_NONE 目标区间有效且数据已复制。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_VALUE 缓冲区为空或数量为零。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS 区间未映射或跨越边界。
+  */
 static nmbs_error prvReadHolding(uint16_t usAddress,
 	uint16_t usQuantity, uint16_t *pusRegisters, uint8_t ucUnitId,
 	void *pvArgument)
 {
-	uint16_t ausDebug[COFFEE3_SERVER_DEBUG_COUNT];
-	uint16_t usIndex;
+	uint16_t ausDebug[COFFEE3_SERVER_DEBUG_COUNT]; /*!< 本次请求临时构造的监控区。 */
+	uint16_t usIndex; /*!< 地址换算或 IO 调试区遍历索引。 */
 
 	(void)ucUnitId;
 	(void)pvArgument;
@@ -783,6 +751,14 @@ static nmbs_error prvReadHolding(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  执行一个本地或外部输出调试寄存器写入。
+  * @param[in] usAddress IO 调试寄存器地址。
+  * @param[in] usValue 输出位掩码；本地输出仅使用低八位。
+  * @retval NMBS_ERROR_NONE 输出已更新或命令已提交。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_VALUE 本地掩码包含高八位。
+  * @retval NMBS_EXCEPTION_SERVER_DEVICE_FAILURE 外部输出命令未被接收。
+  */
 static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 	uint16_t usValue)
 {
@@ -808,11 +784,17 @@ static nmbs_error prvCommitIoDebugWrite(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  读取本地或外部输出当前位掩码。
+  * @param[in] usAddress IO 调试寄存器地址。
+  * @retval 0 地址无效或当前所有输出均关闭。
+  * @retval 其他值 各输出通道当前状态组成的位掩码。
+  */
 static uint16_t prvReadIoDebugValue(uint16_t usAddress)
 {
-	Coffee3IoState_t xIoSnapshot;
-	uint16_t usValue;
-	uint8_t ucIndex;
+	Coffee3IoState_t xIoSnapshot; /*!< IO 管理模块提供的当前状态副本。 */
+	uint16_t usValue; /*!< 按通道位组合的输出状态。 */
+	uint8_t ucIndex; /*!< 输出通道遍历索引。 */
 
 	if ((usAddress != COFFEE3_REG_LOCAL_IO_DEBUG) &&
 		(usAddress != COFFEE3_REG_EXTERNAL_IO_DEBUG)) {
@@ -840,11 +822,20 @@ static uint16_t prvReadIoDebugValue(uint16_t usAddress)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  按地址倒序提交一段连续 IO 调试写入。
+  * @param[in] usAddress 连续写入的起始地址。
+  * @param[in] usQuantity 连续寄存器数量。
+  * @param[in] pusRegisters 待写入的输出位掩码数组。
+  * @retval NMBS_ERROR_NONE 全部写入完成。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS 参数或地址范围无效。
+  * @retval 其他 nmbs_error 某个输出写入失败。
+  */
 static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
-	uint16_t usIndex;
-	nmbs_error xResult;
+	uint16_t usIndex; /*!< 逆序提交时使用的寄存器索引。 */
+	nmbs_error xResult; /*!< 当前单寄存器提交结果。 */
 
 	if ((pusRegisters == NULL) || (usQuantity == 0U) ||
 		((uint32_t)usAddress + usQuantity >
@@ -856,8 +847,8 @@ static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 		((pusRegisters[0] & 0xFF00U) != 0U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
 	}
-	/* Interactive IO debug is a deliberate override of system ownership. */
-	/* Queue remote work first so queue rejection cannot alter local pins. */
+	/* 交互式 IO 调试明确覆盖系统对输出的正常所有权。 */
+	/* 先提交远端输出，避免队列拒绝发生在本地引脚已改变之后。 */
 	for (usIndex = usQuantity; usIndex > 0U; usIndex--) {
 		xResult = prvCommitIoDebugWrite(
 			(uint16_t)(usAddress + usIndex - 1U), pusRegisters[usIndex - 1U]);
@@ -869,6 +860,15 @@ static nmbs_error prvCommitIoDebugWriteRange(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将一次 FC06 写单寄存器请求转交统一提交逻辑。
+  * @param[in] usAddress 目标寄存器地址。
+  * @param[in] usValue 待写入值。
+  * @param[in] ucUnitId 请求单元号，当前实现不使用。
+  * @param[in] pvArgument 回调上下文，当前实现不使用。
+  * @retval NMBS_ERROR_NONE 写入已接受。
+  * @retval 其他 nmbs_error 统一提交逻辑返回的拒绝原因。
+  */
 static nmbs_error prvWriteSingle(uint16_t usAddress, uint16_t usValue,
 	uint8_t ucUnitId, void *pvArgument)
 {
@@ -878,6 +878,16 @@ static nmbs_error prvWriteSingle(uint16_t usAddress, uint16_t usValue,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将一次 FC16 连续写入请求转交统一提交逻辑。
+  * @param[in] usAddress 起始寄存器地址。
+  * @param[in] usQuantity 连续寄存器数量。
+  * @param[in] pusRegisters 待写入数据数组。
+  * @param[in] ucUnitId 请求单元号，当前实现不使用。
+  * @param[in] pvArgument 回调上下文，当前实现不使用。
+  * @retval NMBS_ERROR_NONE 写入已接受。
+  * @retval 其他 nmbs_error 统一提交逻辑返回的拒绝原因。
+  */
 static nmbs_error prvWriteMultiple(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters,
 	uint8_t ucUnitId, void *pvArgument)
@@ -888,6 +898,14 @@ static nmbs_error prvWriteMultiple(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  记录命令拒绝原因并返回指定 Modbus 异常。
+  * @param[in] usAddress 被拒绝的寄存器地址。
+  * @param[in] usValue 被拒绝的寄存器值。
+  * @param[in] pcReason 日志使用的拒绝原因文本。
+  * @param[in] xException 返回给主机的 nanoMODBUS 异常。
+  * @retval xException 调用方指定的异常值。
+  */
 static nmbs_error prvRejectCommand(uint16_t usAddress, uint16_t usValue,
 	const char *pcReason, nmbs_error xException)
 {
@@ -898,11 +916,19 @@ static nmbs_error prvRejectCommand(uint16_t usAddress, uint16_t usValue,
 	return xException;
 }
 
-/* Explicit product write contract; readable space is not writable support. */
+/**
+  * @brief  按 Coffee3Close 产品能力校验一个主机写入值。
+  * @param[in] usAddress 待校验的寄存器地址。
+  * @param[in] usValue 待校验的寄存器值。
+  * @param[in] ucOrderPadding 非零允许订单连续写入中的保留位写零。
+  * @retval NMBS_ERROR_NONE 地址和值受当前产品支持。
+  * @retval 其他 nmbs_error 地址未实现或值越出允许范围。
+  * @note   寄存器可读不表示该地址支持写入。
+  */
 static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 	uint8_t ucOrderPadding)
 {
-	const char *pcReason;
+	const char *pcReason; /*!< 未实现地址对应的产品限制说明。 */
 
 	if ((usAddress <= 0x0014U) && (usAddress != 6U) &&
 		((usAddress <= 0x000EU) || (usAddress >= 0x0013U))) {
@@ -971,7 +997,7 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 		if (usValue <= 1U) { return NMBS_ERROR_NONE; }
 		break;
 	case COFFEE3_REG_ICE_COEFFICIENT:
-		/* Zero restores the default; larger values are milliseconds per gram. */
+		/* 零恢复默认值，其他有效值表示每克制冰所需毫秒数。 */
 		if (usValue <= COFFEE3_CONFIG_ICE_SLOPE_MAX_MS_PER_GRAM) {
 			return NMBS_ERROR_NONE;
 		}
@@ -999,19 +1025,30 @@ static nmbs_error prvValidateHostWrite(uint16_t usAddress, uint16_t usValue,
 		NMBS_EXCEPTION_ILLEGAL_DATA_VALUE);
 }
 
+/**
+  * @brief  校验、持久化并分发一次连续主机寄存器写入。
+  * @param[in] usAddress 连续写入的起始地址。
+  * @param[in] usQuantity 连续寄存器数量。
+  * @param[in] pusRegisters 待提交的寄存器数据。
+  * @retval NMBS_ERROR_NONE 数据已写入镜像或对应动作已接受。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS 地址区间无效或未实现。
+  * @retval NMBS_EXCEPTION_ILLEGAL_DATA_VALUE 参数、值或当前 OTA 状态无效。
+  * @retval NMBS_EXCEPTION_SERVER_DEVICE_FAILURE 持久化或动作接收失败。
+  */
 static nmbs_error prvCommitWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
-	uint32_t ulEndAddress;
-	uint16_t ausFruitCoefficients[COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT];
-	uint16_t usCoefficient;
-	uint16_t usIndex;
-	uint8_t ucCoefficientIndex;
-	uint8_t ucRobotMotionAccepted;
-	uint16_t usIceSlope;
-	ConfigStoreResult_e xConfigResult;
-	nmbs_error xValidation;
+	uint32_t ulEndAddress; /*!< 写入区间首个未包含地址，用于溢出和覆盖判断。 */
+	uint16_t ausFruitCoefficients[COFFEE3_CONFIG_FRUIT_CHANNEL_COUNT]; /*!< 合并后的果奶系数配置。 */
+	uint16_t usCoefficient; /*!< 当前果奶通道待保存的有效系数。 */
+	uint16_t usIndex; /*!< 写入数据或配置通道遍历索引。 */
+	uint8_t ucCoefficientIndex; /*!< 果奶系数配置数组索引。 */
+	uint8_t ucRobotMotionAccepted; /*!< 本次写入已预留机器人调试动作。 */
+	uint16_t usIceSlope; /*!< 归一化后的制冰时间系数，单位为毫秒每克。 */
+	ConfigStoreResult_e xConfigResult; /*!< 制冰系数持久化结果。 */
+	nmbs_error xValidation; /*!< 当前寄存器值的产品能力校验结果。 */
 
+	/* 步骤 1：校验缓冲区、地址范围以及整个写入区间的每个值。 */
 	if ((pusRegisters == NULL) || (usQuantity == 0U)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
 	}
@@ -1020,7 +1057,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		return prvRejectCommand(usAddress, pusRegisters[0],
 			"address range overflow", NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
 	}
-	/* Validate the entire FC16 request before any register or device changes. */
+	/* 在改变寄存器或设备前完整校验 FC16 请求，避免部分提交。 */
 	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
 		xValidation = prvValidateHostWrite((uint16_t)(usAddress + usIndex),
 			pusRegisters[usIndex], ((usQuantity > 1U) &&
@@ -1028,8 +1065,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		if (xValidation != NMBS_ERROR_NONE) { return xValidation; }
 	}
 	ucRobotMotionAccepted = 0U;
-	/* Reserve before acknowledging FC06/FC16. A full pending slot must not
-	 * appear to the host as a successfully accepted second motion. */
+	/* 步骤 2：在应答前预留机器人或门调试动作，防止重复动作假成功。 */
 	if ((usAddress <= 0x0031U) && (ulEndAddress > 0x0031U)) {
 		if (prvSubmitRobotPosition(pusRegisters[0x0031U - usAddress]) == 0U) {
 			return prvRejectCommand(0x0031U, pusRegisters[0x0031U - usAddress],
@@ -1060,7 +1096,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 			(unsigned int)usAddress, (unsigned int)pusRegisters[0]);
 		return NMBS_ERROR_NONE;
 	}
-	/* Robot acknowledgement updates data only, without dispatching a task. */
+	/* 机器人确认只更新数据，不分发新的任务。 */
 	if ((usQuantity == 1U) && ((usAddress == 0x0033U) ||
 		((usAddress == COFFEE3_REG_ONLINE_OUTPUT) &&
 		(pusRegisters[0] == 0U)))) {
@@ -1069,6 +1105,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		taskEXIT_CRITICAL();
 		return NMBS_ERROR_NONE;
 	}
+	/* 步骤 3：分流已移除 IO、现用 IO 调试以及兼容升级寄存器。 */
 	if (((uint32_t)usAddress <= COFFEE3_SERVER_REMOVED_IO_DEBUG_LAST) &&
 		(ulEndAddress > COFFEE3_SERVER_REMOVED_IO_DEBUG_FIRST)) {
 		return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
@@ -1086,6 +1123,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 		return prvCommitUpgradeWrite(usAddress, usQuantity,
 			pusRegisters);
 	}
+	/* 步骤 4：HTTP OTA 期间拒绝普通业务写入并对日志去重。 */
 	if (ucCoffee3OtaHttpIsActive() != 0U) {
 		if (s_ucOtaRejectLogged == 0U) {
 			s_ucOtaRejectLogged = 1U;
@@ -1097,7 +1135,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 	s_ucOtaRejectLogged = 0U;
 	if (((uint32_t)usAddress + usQuantity) <=
 		COFFEE3_SERVER_COMMAND_COUNT) {
-		/* Persist before publishing registers or dispatching this request. */
+		/* 步骤 5：先持久化配置，再发布寄存器并分发本次请求。 */
 		if ((usAddress <= COFFEE3_CONFIG_STORAGE_REGISTER) &&
 			(ulEndAddress > COFFEE3_CONFIG_STORAGE_REGISTER)) {
 			if (xCoffee3ConfigSetStorageMask(pusRegisters[
@@ -1115,7 +1153,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 						ucCoefficientIndex + 1U);
 			}
 			for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
-				uint16_t usCurrentAddress;
+				uint16_t usCurrentAddress; /*!< 当前遍历的绝对寄存器地址。 */
 
 				usCurrentAddress = (uint16_t)(usAddress + usIndex);
 				if ((usCurrentAddress >=
@@ -1184,6 +1222,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 				(unsigned int)(pusRegisters[usIndex] & 0x0001U));
 		}
 		taskENTER_CRITICAL();
+		/* 步骤 6：在临界区发布整段命令镜像，保证读者不见半段写入。 */
 		memcpy(&s_ausCommandRegisters[usAddress], pusRegisters,
 			(size_t)usQuantity * sizeof(uint16_t));
 		for (ucCoefficientIndex = 0U;
@@ -1199,7 +1238,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 			s_ausCommandRegisters[0x0031U] = 0U;
 		}
 		taskEXIT_CRITICAL();
-		/* A configuration-only range must not retry a previously staged order. */
+		/* 只包含配置的写入区间不得重新提交先前暂存的订单。 */
 		if ((usAddress <= COFFEE3_REG_SYRUP_4) ||
 			(usAddress > COFFEE3_CONFIG_STORAGE_REGISTER) ||
 			(ulEndAddress <= COFFEE3_CONFIG_STORAGE_REGISTER)) {
@@ -1208,6 +1247,7 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 				!((usAddress >= COFFEE3_REG_FRUIT_COEFFICIENT_FIRST) &&
 				(ulEndAddress <=
 					(uint32_t)COFFEE3_REG_FRUIT_COEFFICIENT_LAST + 1U))) {
+				/* 步骤 7：仅在订单相关区间发生变化时重新评估订单。 */
 				prvEvaluateOrder();
 			}
 		}
@@ -1219,17 +1259,26 @@ static nmbs_error prvCommitWrite(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  提交兼容升级区的 OTA、延迟复位与版本日志控制。
+  * @param[in] usAddress 升级区内的起始地址。
+  * @param[in] usQuantity 连续寄存器数量。
+  * @param[in] pusRegisters 待提交的控制值数组。
+  * @retval NMBS_ERROR_NONE 控制值已保存，并已记录对应的异步请求。
+  * @retval NMBS_EXCEPTION_SERVER_DEVICE_FAILURE HTTP OTA 创建请求提交失败。
+  * @note 写入 0x0200=1 时，成功仅表示 HTTP OTA 创建请求已排队或监听服务已存在。
+  */
 static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
-	uint32_t ulEndAddress;
-	uint16_t usValue;
-	BaseType_t xResult;
-	uint16_t usIndex;
+	uint32_t ulEndAddress; /*!< 升级写入区间首个未包含地址。 */
+	uint16_t usValue; /*!< 当前升级控制寄存器值。 */
+	BaseType_t xResult; /*!< HTTP OTA 创建请求是否已接收或监听服务是否已存在。 */
+	uint16_t usIndex; /*!< 升级写入数组遍历索引。 */
 
 
 	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
-		/* F123 is a host debug path: reservation failure is never a protocol rejection. */
+		/* 步骤 1：兼容调试入口尝试预留 OTA，失败也不拒绝协议写入。 */
 		if (((uint32_t)usAddress + usIndex ==
 			(uint32_t)COFFEE3_SERVER_UPGRADE_BASE) &&
 			(pusRegisters[usIndex] == 1U) &&
@@ -1240,6 +1289,7 @@ static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 		}
 	}
 
+	/* 步骤 2：保存升级控制镜像，再分别处理三个兼容控制位。 */
 	memcpy(&s_ausUpgradeRegisters[
 		usAddress - COFFEE3_SERVER_UPGRADE_BASE], pusRegisters,
 		(size_t)usQuantity * sizeof(uint16_t));
@@ -1283,11 +1333,15 @@ static nmbs_error prvCommitUpgradeWrite(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在订单存在且已核对时复制订单并尝试提交工作流。
+  * @note   0x0007 为订单存在门槛，0x0008 必须等于 1 才提交。
+  */
 static void prvEvaluateOrder(void)
 {
-	Coffee3Order_t xOrder;
-	BaseType_t xResult;
-	uint16_t usIndex;
+	Coffee3Order_t xOrder; /*!< 从命令镜像复制出的稳定订单数据。 */
+	BaseType_t xResult; /*!< 工作流订单队列提交结果。 */
+	uint16_t usIndex; /*!< 订单寄存器复制索引。 */
 
 	if (s_ausCommandRegisters[COFFEE3_REG_ORDER_PRESENT] == 0U) {
 		s_ucOrderLatched = 0U;
@@ -1336,15 +1390,22 @@ static void prvEvaluateOrder(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将本次写入覆盖的维护寄存器转换为工作流或设备命令。
+  * @param[in] usAddress 本次写入的起始地址。
+  * @param[in] usQuantity 本次写入覆盖的寄存器数量。
+  * @note   储存取杯仅在 0x0009 与 0x000A 都非零时评估。
+  */
 static void prvEvaluateManualCommands(uint16_t usAddress,
 	uint16_t usQuantity)
 {
-	uint32_t ulEndAddress;
-	uint16_t usStorage;
-	uint16_t usOutput;
-	uint16_t usValue;
-	uint8_t ucAccepted;
+	uint32_t ulEndAddress; /*!< 写入区间首个未包含地址。 */
+	uint16_t usStorage; /*!< 储存取杯请求中的储存位编号。 */
+	uint16_t usOutput; /*!< 储存取杯请求中的出口编号。 */
+	uint16_t usValue; /*!< 当前正在解释的维护寄存器值。 */
+	uint8_t ucAccepted; /*!< 当前人工设备命令已被队列接收。 */
 
+	/* 步骤 1：处理顾客取餐确认和 0x0009/0x000A 储存取杯组合。 */
 	ulEndAddress = (uint32_t)usAddress + usQuantity;
 	if ((usAddress <= COFFEE3_REG_PICKUP_CONFIRM) &&
 		(ulEndAddress > COFFEE3_REG_PICKUP_CONFIRM)) {
@@ -1358,8 +1419,7 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 		(ulEndAddress > COFFEE3_REG_STORAGE_PICKUP)) {
 		usStorage = s_ausCommandRegisters[COFFEE3_REG_STORAGE_PICKUP];
 		usOutput = s_ausCommandRegisters[COFFEE3_REG_ONLINE_OUTPUT];
-		/* The host may write 0x0009 and 0x000A separately. Evaluate only
-		 * after both halves of the pickup request are present. */
+		/* 主机可能分开写入两个寄存器，仅在两半请求齐全后评估。 */
 		if ((usStorage != 0U) && (usOutput != 0U)) {
 			if (s_ausCommandRegisters[COFFEE3_REG_ORDER_PRESENT] != 0U) {
 				(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
@@ -1390,6 +1450,7 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 			}
 		}
 	}
+	/* 步骤 2：处理取消订单、清除报警和机器人本体调试命令。 */
 	if ((usAddress <= COFFEE3_REG_CANCEL_ORDER) &&
 		(ulEndAddress > COFFEE3_REG_CANCEL_ORDER) &&
 		(s_ausCommandRegisters[COFFEE3_REG_CANCEL_ORDER] != 0U)) {
@@ -1460,6 +1521,7 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 			s_ausCommandRegisters[0x0030U] = 0U;
 		}
 	}
+	/* 步骤 3：处理咖啡机、杯盖机与糖浆机调试请求。 */
 	if ((usAddress <= 0x0040U) && (ulEndAddress > 0x0040U) &&
 		(s_ausCommandRegisters[0x0040U] <= COFFEE3_COFFEE_RECIPE_MAX) &&
 		(prvSubmitManual(COFFEE3_DEVICE_COFFEE_MACHINE,
@@ -1543,6 +1605,7 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 			COFFEE3_MAINTENANCE_SYRUP_CLEAN, 0U, 0U) == pdPASS)) {
 		s_ausCommandRegisters[0x0063U] = 0U;
 	}
+	/* 步骤 4：处理制冰、热水、清洗和果奶维护请求。 */
 	if ((usAddress <= 0x0070U) && (ulEndAddress > 0x0070U) &&
 		(s_ausCommandRegisters[0x0070U] != 0U)) {
 		if (xCoffee3WorkflowSubmitManualIce(
@@ -1613,10 +1676,17 @@ static void prvEvaluateManualCommands(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  更新兼容寄存器最近值并判断是否需要再次记录日志。
+  * @param[in] usAddress 兼容寄存器地址。
+  * @param[in] usValue 本次写入后的有效值。
+  * @retval 1 地址未受去重表管理，或该值首次出现、已经变化。
+  * @retval 0 该地址已记录过相同值。
+  */
 static uint8_t prvCompatibilityLogValueChanged(uint16_t usAddress,
 	uint16_t usValue)
 {
-	uint16_t usIndex;
+	uint16_t usIndex; /*!< 兼容寄存器地址表遍历索引。 */
 
 	for (usIndex = 0U; usIndex < COFFEE3_COMPATIBILITY_LOG_COUNT;
 		usIndex++) {
@@ -1635,13 +1705,19 @@ static uint8_t prvCompatibilityLogValueChanged(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  记录已接受但受产品能力限制的兼容寄存器写入。
+  * @param[in] usAddress 本次写入的起始地址。
+  * @param[in] usQuantity 连续寄存器数量。
+  * @param[in] pusRegisters 主机请求的原始值数组。
+  */
 static void prvLogCompatibilityWrites(uint16_t usAddress,
 	uint16_t usQuantity, const uint16_t *pusRegisters)
 {
-	uint16_t usCurrentAddress;
-	uint16_t usIndex;
-	uint16_t usValue;
-	const char *pcReason;
+	uint16_t usCurrentAddress; /*!< 当前检查的绝对寄存器地址。 */
+	uint16_t usIndex; /*!< 连续写入数组遍历索引。 */
+	uint16_t usValue; /*!< 命令镜像中归一化后的有效值。 */
+	const char *pcReason; /*!< 当前地址对应的产品兼容说明。 */
 
 	for (usIndex = 0U; usIndex < usQuantity; usIndex++) {
 		usCurrentAddress = (uint16_t)(usAddress + usIndex);
@@ -1725,10 +1801,16 @@ static void prvLogCompatibilityWrites(uint16_t usAddress,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将 0x0031 位置枚举转换为机器人动作并提交。
+  * @param[in] usPosition 主机协议定义的位置值。
+  * @retval 1 位置有效且动作已被命令队列接收。
+  * @retval 0 位置未实现、设备未就绪或命令队列拒绝。
+  */
 static uint8_t prvSubmitRobotPosition(uint16_t usPosition)
 {
-	Coffee3Action_e xAction;
-	uint16_t usParameter;
+	Coffee3Action_e xAction; /*!< 位置值映射得到的标准机器人动作。 */
+	uint16_t usParameter; /*!< 动作使用的杯位、出口或储存位参数。 */
 
 	usParameter = 0U;
 	switch (usPosition) {
@@ -1791,17 +1873,26 @@ static uint8_t prvSubmitRobotPosition(uint16_t usPosition)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  校验设备就绪条件并提交一条高优先级调试命令。
+  * @param[in] xDeviceId 目标逻辑设备。
+  * @param[in] xAction 目标设备动作。
+  * @param[in] usParameter0 动作参数 0。
+  * @param[in] usParameter1 动作参数 1。
+  * @retval 1 命令已进入高优先级队列。
+  * @retval 0 设备未就绪、标识无效或队列未接收命令。
+  */
 static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 	Coffee3Action_e xAction, uint16_t usParameter0,
 	uint16_t usParameter1)
 {
-	Coffee3Command_t xCommand;
-	const Coffee3DeviceBinding_t *pxBinding;
-	const char *pcDeviceName;
-	uint8_t ucDebug;
+	Coffee3Command_t xCommand; /*!< 准备提交到设备路由的标准命令。 */
+	const Coffee3DeviceBinding_t *pxBinding; /*!< 设备静态绑定信息。 */
+	const char *pcDeviceName; /*!< 日志中显示的设备名称。 */
+	uint8_t ucDebug; /*!< 非零为命令附加调试来源标记。 */
 
-	/* Robot body controls need TCP only; custom-program actions need READY.
-	 * Other device debug retains its existing online/ready boundary. */
+	/* 机器人本体控制只要求 TCP 已连接，自定义程序动作还要求设备就绪。 */
+	/* 其他设备调试命令沿用在线且就绪的准入条件。 */
 	ucDebug = 1U;
 	pxBinding = pxCoffee3DeviceGetBinding(xDeviceId);
 	pcDeviceName = (pxBinding != NULL) ? pxBinding->pcName : "Unknown";
@@ -1853,19 +1944,25 @@ static uint8_t prvSubmitManual(Coffee3DeviceId_e xDeviceId,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  按当前任务、设备和通信状态构造 0x1100 私有监控区。
+  * @param[out] pusDebug 容量至少为 COFFEE3_SERVER_DEBUG_COUNT 的数组。
+  * @note   多个模块状态依次采集，所得数据不构成原子快照。
+  */
 static void prvBuildDebugRegisters(uint16_t *pusDebug)
 {
-	AppTaskManagerStatus_t xTaskStatus;
-	Coffee3LogStatus_t xLogStatus;
-	EventBits_t xEvents;
-	uint32_t ulHeapBytes;
-	uint32_t ulMinimumHeapBytes;
-	uint16_t usBase;
-	uint16_t usReadyMask;
-	uint8_t ucBusIndex;
-	uint8_t ucClientIndex;
-	uint8_t ucDeviceId;
+	AppTaskManagerStatus_t xTaskStatus; /*!< 各应用任务启动与就绪状态。 */
+	Coffee3LogStatus_t xLogStatus; /*!< 日志队列当前统计。 */
+	EventBits_t xEvents; /*!< 当前设备的事件位快照。 */
+	uint32_t ulHeapBytes; /*!< 当前剩余堆空间，单位为字节。 */
+	uint32_t ulMinimumHeapBytes; /*!< 启动以来最小剩余堆空间，单位为字节。 */
+	uint16_t usBase; /*!< 当前设备、客户端或总线在监控区的基址。 */
+	uint16_t usReadyMask; /*!< 应用任务就绪状态组合位。 */
+	uint8_t ucBusIndex; /*!< RTU 总线状态遍历索引。 */
+	uint8_t ucClientIndex; /*!< TCP 客户端状态遍历索引。 */
+	uint8_t ucDeviceId; /*!< 逻辑设备状态遍历标识。 */
 
+	/* 步骤 1：清空输出并写入服务、工作流、日志和堆统计。 */
 	memset(pusDebug, 0,
 		COFFEE3_SERVER_DEBUG_COUNT * sizeof(uint16_t));
 	vCoffee3LogGetStatus(&xLogStatus);
@@ -1889,6 +1986,7 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 	pusDebug[13] = (uint16_t)(ulMinimumHeapBytes >> 16);
 	pusDebug[14] = g_xCoffee3ServerStatus.ucListening;
 	pusDebug[15] = g_xCoffee3ServerStatus.usListenPort;
+	/* 步骤 2：写入各逻辑设备的事件、结果与最近命令编号。 */
 	for (ucDeviceId = 1U; ucDeviceId < COFFEE3_DEVICE_COUNT;
 		ucDeviceId++) {
 		usBase = (uint16_t)(0x10U +
@@ -1904,6 +2002,7 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 			(g_axCoffee3DeviceStatus[ucDeviceId].ulLastCommandId >>
 				16);
 	}
+	/* 步骤 3：组合任务管理器的启动结果和就绪位。 */
 	usReadyMask = 0U;
 	usReadyMask |= (xTaskStatus.ucLogReady != 0U) ? 0x0001U : 0U;
 	usReadyMask |= (xTaskStatus.ucDeviceReady != 0U) ? 0x0002U : 0U;
@@ -1924,10 +2023,11 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 		(uint16_t)(xTaskStatus.ulTaskFailedMask >> 16);
 	pusDebug[0x3EU] = (uint16_t)xTaskStatus.xStartResult;
 	pusDebug[0x3FU] = usReadyMask;
+	/* 步骤 4：按槽位写入客户端连接和累计请求统计。 */
 	for (ucClientIndex = 0U;
 		ucClientIndex < COFFEE3_SERVER_MAX_CLIENTS;
 		ucClientIndex++) {
-		Coffee3ServerClientStatus_t *pxClient;
+		Coffee3ServerClientStatus_t *pxClient; /*!< 当前客户端槽位状态。 */
 
 		pxClient =
 			&g_xCoffee3ServerStatus.axClient[ucClientIndex];
@@ -1956,6 +2056,7 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 		pusDebug[usBase + 11U] =
 			(uint16_t)(pxClient->ulLastActivityTick >> 16);
 	}
+	/* 步骤 5：写入机器人 TCP 重连统计和每条 RTU 总线状态。 */
 	pusDebug[0x58U] = g_xCoffee3RobotTcpStatus.ucConnected;
 	pusDebug[0x59U] =
 		(uint16_t)g_xCoffee3RobotTcpStatus.ulConnectAttemptCount;
@@ -1973,7 +2074,7 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 		(uint16_t)g_xCoffee3RobotTcpStatus.lLastResult;
 	for (ucBusIndex = 0U; ucBusIndex < COFFEE3_RTU_BUS_COUNT;
 		ucBusIndex++) {
-		Coffee3RtuBusStatus_t *pxBus;
+		Coffee3RtuBusStatus_t *pxBus; /*!< 当前 RTU 总线运行状态。 */
 
 		pxBus = &g_axCoffee3RtuBusStatus[ucBusIndex];
 		usBase = (uint16_t)(0x60U +
@@ -1992,35 +2093,41 @@ static void prvBuildDebugRegisters(uint16_t *pusDebug)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将设备镜像、工作流和 IO 状态投影到 0x1000 状态区。
+  * @note   函数刷新本地 GPIO 后读取已有镜像，不主动发起 RTU 或 TCP 查询。
+  * @note   各数据源依次读取，最终状态区不构成跨模块原子快照。
+  */
 static void prvRefreshStatusRegisters(void)
 {
-	Coffee3IoState_t xIoSnapshot;
-	EventBits_t xRobotEvents;
-	EventBits_t xCoffeeEvents;
-	EventBits_t xCupEvents;
-	EventBits_t xLidEvents;
-	EventBits_t xSyrupEvents;
-	EventBits_t xIceEvents;
-	uint16_t usIoStatus;
-	uint16_t usMachineStatus;
-	uint16_t usFault;
-	uint8_t ucIceFaultMask;
-	uint16_t usCupState;
-	uint16_t usLidState;
-	uint16_t usCupFault;
-	uint16_t usLidFault;
-	uint16_t usCupFault2;
-	uint16_t usLidFault2;
-	uint16_t usSyrupState;
-	uint16_t usFruitState;
-	uint16_t usLocalIoBitmap;
-	uint16_t usInputIoBitmap;
-	uint16_t usOutputIoBitmap;
-	uint16_t usEnergyInteger;
-	uint16_t usEnergyFraction;
-	uint32_t ulEnergyCentikWh;
-	uint8_t ucIndex;
+	Coffee3IoState_t xIoSnapshot; /*!< 本地及扩展 IO 状态副本。 */
+	EventBits_t xRobotEvents; /*!< 机器人设备事件位。 */
+	EventBits_t xCoffeeEvents; /*!< 咖啡机设备事件位。 */
+	EventBits_t xCupEvents; /*!< 落杯机设备事件位。 */
+	EventBits_t xLidEvents; /*!< 落盖机设备事件位。 */
+	EventBits_t xSyrupEvents; /*!< 糖浆机设备事件位。 */
+	EventBits_t xIceEvents; /*!< 制冰机设备事件位。 */
+	uint16_t usIoStatus; /*!< 输入与输出 RTU 从站在线组合状态。 */
+	uint16_t usMachineStatus; /*!< 工作流机器状态协议值。 */
+	uint16_t usFault; /*!< 制冰机综合故障标记。 */
+	uint8_t ucIceFaultMask; /*!< 制冰机寄存器解析出的故障位掩码。 */
+	uint16_t usCupState; /*!< 落杯机一、二通道汇总状态。 */
+	uint16_t usLidState; /*!< 落盖机一、二通道汇总状态。 */
+	uint16_t usCupFault; /*!< 一号落杯通道故障组合位。 */
+	uint16_t usLidFault; /*!< 一号落盖通道故障组合位。 */
+	uint16_t usCupFault2; /*!< 二号落杯通道故障组合位。 */
+	uint16_t usLidFault2; /*!< 二号落盖通道故障组合位。 */
+	uint16_t usSyrupState; /*!< 糖浆机各通道汇总状态。 */
+	uint16_t usFruitState; /*!< 两路果奶工作流状态中的较大值。 */
+	uint16_t usLocalIoBitmap; /*!< 本地输入低八位与输出高八位组合。 */
+	uint16_t usInputIoBitmap; /*!< 外部输入模块通道位图。 */
+	uint16_t usOutputIoBitmap; /*!< 外部输出模块通道位图。 */
+	uint16_t usEnergyInteger; /*!< 累计能量整数部分，单位为千瓦时。 */
+	uint16_t usEnergyFraction; /*!< 累计能量百分之一千瓦时部分。 */
+	uint32_t ulEnergyCentikWh; /*!< 四舍五入后的百分之一千瓦时总数。 */
+	uint8_t ucIndex; /*!< IO 或设备镜像通道遍历索引。 */
 
+	/* 步骤 1：读取工作流状态、设备事件和杯盖故障镜像。 */
 	usMachineStatus =
 		(uint16_t)g_xCoffee3WorkflowStatus.xMachineState;
 	xRobotEvents = xCoffee3DeviceGetEvents(COFFEE3_DEVICE_ROBOT);
@@ -2078,6 +2185,7 @@ static void prvRefreshStatusRegisters(void)
 	} else {
 		usLidState = 1U;
 	}
+	/* 步骤 2：汇总糖浆机在线、故障和忙碌状态。 */
 	usSyrupState =
 		((xSyrupEvents & COFFEE3_DEVICE_EVENT_ONLINE) != 0U) ? 1U : 0U;
 	for (ucIndex = 1U;
@@ -2090,6 +2198,7 @@ static void prvRefreshStatusRegisters(void)
 			usSyrupState = 2U;
 		}
 	}
+	/* 步骤 3：刷新本地 GPIO，并将本地及扩展 IO 转换为位图。 */
 	usIoStatus = 0x2000U;
 	if (g_axCoffee3DeviceStatus[COFFEE3_DEVICE_IO_INPUT].ucOnline !=
 		0U) {
@@ -2122,6 +2231,7 @@ static void prvRefreshStatusRegisters(void)
 			usOutputIoBitmap |= (uint16_t)(1U << ucIndex);
 		}
 	}
+	/* 步骤 4：汇总果奶状态并把电能浮点值拆为整数和两位小数。 */
 	usFruitState = g_xCoffee3WorkflowStatus.aucFruitState[0];
 	if (g_xCoffee3WorkflowStatus.aucFruitState[1] > usFruitState) {
 		usFruitState = g_xCoffee3WorkflowStatus.aucFruitState[1];
@@ -2135,13 +2245,14 @@ static void prvRefreshStatusRegisters(void)
 		usEnergyInteger = (uint16_t)(ulEnergyCentikWh / 100U);
 		usEnergyFraction = (uint16_t)(ulEnergyCentikWh % 100U);
 	}
+	/* 步骤 5：在临界区将已采集数据写入主机状态寄存器镜像。 */
 	taskENTER_CRITICAL();
 	s_ausStatusRegisters[COFFEE3_REG_MACHINE_STATUS -
 		COFFEE3_REG_STATUS_BASE] = usMachineStatus;
 	s_ausStatusRegisters[0x0025U] = usIoStatus;
 	s_ausStatusRegisters[0x0029U] =
 		(uint16_t)g_xCoffee3WorkflowStatus.lLastError;
-	/* The protocol reserves a 32-channel page for each IO category. */
+	/* 协议为每类 IO 预留 32 通道页面，未实现的高位页明确写零。 */
 	s_ausStatusRegisters[COFFEE3_REG_LOCAL_INPUT_LOW -
 		COFFEE3_REG_STATUS_BASE] = (uint16_t)(usLocalIoBitmap & 0x00FFU);
 	s_ausStatusRegisters[COFFEE3_REG_LOCAL_INPUT_HIGH -
@@ -2197,9 +2308,7 @@ static void prvRefreshStatusRegisters(void)
 		g_xCoffee3WorkflowStatus.aucFruitState[1];
 	s_ausStatusRegisters[0x000BU] = g_xCoffee3WorkflowStatus.ausOutputState[0];
 	s_ausStatusRegisters[0x000CU] = 0U;
-	/* 0x1027 is the live storage occupancy mask. Match Coffee1 semantics:
-	 * a bit is visible only when the physical cup input is active and the
-	 * corresponding storage is enabled by persistent configuration 0x001A. */
+	/* 0x1027 仅显示物理有杯且被持久化配置 0x001A 启用的储存位。 */
 	s_ausStatusRegisters[0x0027U] = (uint16_t)(usInputIoBitmap &
 		usCoffee3ConfigStorageMask() & COFFEE3_STORAGE_INSTALLED_MASK);
 	s_ausStatusRegisters[0x001AU] = usEnergyInteger;
@@ -2265,8 +2374,7 @@ static void prvRefreshStatusRegisters(void)
 	} else {
 		s_ausStatusRegisters[0x0070U] = 1U;
 	}
-	/* 0x1071..0x107E follow the Coffee1 host status contract. Fields not
-	 * provided by this ice-machine protocol are refreshed explicitly to 0. */
+	/* 0x1071 至 0x107E 沿用主机状态约定，制冰协议未提供的字段写零。 */
 	s_ausStatusRegisters[0x0071U] =
 		g_xCoffee3IceImage.ausRegisters[2];
 	s_ausStatusRegisters[0x0072U] =
@@ -2300,11 +2408,16 @@ static void prvRefreshStatusRegisters(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  创建、绑定并启动一个非阻塞 Modbus TCP 监听 socket。
+  * @retval 非负值 可用的监听 socket 描述符。
+  * @retval -1 socket 创建、绑定或监听失败。
+  */
 static int prvCreateListener(void)
 {
-	struct sockaddr_in xAddress;
-	int lListener;
-	int lReuse;
+	struct sockaddr_in xAddress; /*!< 监听端口与任意本地地址配置。 */
+	int lListener; /*!< 新建的监听 socket 描述符。 */
+	int lReuse; /*!< SO_REUSEADDR 选项值。 */
 
 	lListener = lwip_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (lListener < 0) {
@@ -2331,11 +2444,18 @@ static int prvCreateListener(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  关闭一个客户端槽位并更新断开统计和原因。
+  * @param[in,out] pxSlot 客户端传输与 Modbus 资源。
+  * @param[in,out] pxStatus 对应槽位的公开状态。
+  * @param[in] ucSlotIndex 日志使用的槽位索引。
+  * @param[in] lReason 本次关闭原因或规范化错误码。
+  */
 static void prvCloseSlot(Coffee3ServerSlot_t *pxSlot,
 	Coffee3ServerClientStatus_t *pxStatus, uint8_t ucSlotIndex,
 	int32_t lReason)
 {
-	uint8_t ucWasConnected;
+	uint8_t ucWasConnected; /*!< 关闭前连接状态，用于避免重复累计断开次数。 */
 
 	if ((pxSlot == NULL) || (pxStatus == NULL)) {
 		return;
@@ -2357,11 +2477,15 @@ static void prvCloseSlot(Coffee3ServerSlot_t *pxSlot,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  重新统计活动客户端并在在线状态变化时记录日志。
+  * @note   任一客户端槽位已连接时服务端即视为在线。
+  */
 static void prvUpdateActiveClientCount(void)
 {
-	uint8_t ucCount;
-	uint8_t ucIndex;
-	uint8_t ucWasOnline;
+	uint8_t ucCount; /*!< 当前已连接客户端数量。 */
+	uint8_t ucIndex; /*!< 客户端状态数组遍历索引。 */
+	uint8_t ucWasOnline; /*!< 更新前的服务端在线状态。 */
 
 	ucWasOnline = g_xCoffee3ServerStatus.ucOnline;
 	ucCount = 0U;

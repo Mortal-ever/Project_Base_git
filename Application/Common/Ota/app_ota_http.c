@@ -1,11 +1,11 @@
 /**
   * @file      app_ota_http.c
-  * @brief     Serve a minimal browser-compatible raw-lwIP OTA endpoint.
+  * @brief     实现兼容浏览器上传的最小 Raw LwIP HTTP OTA 服务。
   * @author    WHong
-  * @date      2026-08-25
+  * @date      2026-09-24
   *
-  * @details   All lwIP calls execute on the tcpip thread. The sole static
-  *            session streams pbuf content into the common flash writer.
+  * @details   所有 LwIP 调用均在 tcpip 线程执行。唯一静态会话将 pbuf
+  *            数据流送入公共 Flash 写入器。
   */
 
 #include "Ota/app_ota_http.h"
@@ -24,53 +24,63 @@
 #include "lwip/timeouts.h"
 #include "main.h"
 
+/** @brief HTTP 请求头缓存容量，单位为字节。 */
 #define APP_OTA_HTTP_HEADER_CAP             2048U
+/** @brief multipart 分段头缓存容量，单位为字节。 */
 #define APP_OTA_HTTP_PART_HEADER_CAP        512U
+/** @brief 允许的 multipart 边界文本最大长度。 */
 #define APP_OTA_HTTP_BOUNDARY_CAP           70U
+/** @brief 尾边界标记及滑动保持缓存容量。 */
 #define APP_OTA_HTTP_MARKER_CAP             80U
+/** @brief Content-Length 中允许的表单封装额外字节数。 */
 #define APP_OTA_HTTP_BODY_OVERHEAD          4096UL
+/** @brief 单条接收诊断日志的文本容量。 */
 #define APP_OTA_HTTP_LOG_TEXT_CAP           72U
+/** @brief 拒绝请求时最多输出的接收诊断字节数。 */
 #define APP_OTA_HTTP_DIAGNOSTIC_CAP         512U
 
+/** @brief 表示唯一 HTTP 连接当前正在解析或发送的阶段。 */
 typedef enum {
-	APP_OTA_HTTP_HEADER = 0,
-	APP_OTA_HTTP_PART_HEADER = 1,
-	APP_OTA_HTTP_DATA = 2,
-	APP_OTA_HTTP_COMPLETE = 3,
-	APP_OTA_HTTP_RESPONSE = 4
+	APP_OTA_HTTP_HEADER = 0, /*!< 正在接收 HTTP 请求头。 */
+	APP_OTA_HTTP_PART_HEADER = 1, /*!< 正在接收 multipart 文件段头。 */
+	APP_OTA_HTTP_DATA = 2, /*!< 正在流式写入固件数据。 */
+	APP_OTA_HTTP_COMPLETE = 3, /*!< 固件已提交并等待构造响应。 */
+	APP_OTA_HTTP_RESPONSE = 4 /*!< 正在分段发送 HTTP 响应。 */
 } AppOtaHttpState_e;
 
+/** @brief 保存唯一 OTA HTTP 连接的解析、响应和上传状态。 */
 typedef struct {
-	struct tcp_pcb *pxPcb;
-	const char *pcResponse;
-	uint16_t usResponseLength;
-	uint16_t usResponseOffset;
-	uint16_t usHeaderLength;
-	uint16_t usPartHeaderLength;
-	uint16_t usBoundaryLength;
-	uint16_t usMarkerLength;
-	uint16_t usHoldLength;
-	uint32_t ulContentLength;
-	uint32_t ulWrittenBytes;
-	uint32_t ulNextProgress;
-	uint8_t ucInUse;
-	uint8_t ucHeaderDone;
-	uint8_t ucPostRequest;
-	uint8_t ucUploadActive;
-	uint8_t ucResetPending;
-	uint8_t ucBoundaryReady;
-	AppOtaHttpState_e xState;
-	char acHeader[APP_OTA_HTTP_HEADER_CAP];
-	char acPartHeader[APP_OTA_HTTP_PART_HEADER_CAP];
-	char acBoundary[APP_OTA_HTTP_BOUNDARY_CAP + 1U];
-	uint8_t aucMarker[APP_OTA_HTTP_MARKER_CAP];
-	uint8_t aucHold[APP_OTA_HTTP_MARKER_CAP];
+	struct tcp_pcb *pxPcb; /*!< 当前连接的 Raw TCP 控制块。 */
+	const char *pcResponse; /*!< 当前待发送的静态 HTTP 响应。 */
+	uint16_t usResponseLength; /*!< 响应总字节数。 */
+	uint16_t usResponseOffset; /*!< 已交给 TCP 的响应字节数。 */
+	uint16_t usHeaderLength; /*!< 已接收的 HTTP 请求头字节数。 */
+	uint16_t usPartHeaderLength; /*!< 已接收的文件分段头字节数。 */
+	uint16_t usBoundaryLength; /*!< multipart 边界文本长度。 */
+	uint16_t usMarkerLength; /*!< 结束边界标记的完整长度。 */
+	uint16_t usHoldLength; /*!< 滑动保持缓存内的有效字节数。 */
+	uint32_t ulContentLength; /*!< 请求头声明的 HTTP 正文长度。 */
+	uint32_t ulWrittenBytes; /*!< 已提交给 Flash 写入器的镜像字节数。 */
+	uint32_t ulNextProgress; /*!< 下次输出进度日志的累计字节门限。 */
+	uint8_t ucInUse; /*!< 非零表示静态会话已被一个连接占用。 */
+	uint8_t ucHeaderDone; /*!< 非零表示完整 HTTP 请求头已经收齐。 */
+	uint8_t ucPostRequest; /*!< 非零表示本连接是合法上传请求。 */
+	uint8_t ucUploadActive; /*!< 非零表示本会话已启动 Flash 写入。 */
+	uint8_t ucResetPending; /*!< 非零表示提交成功后已安排系统复位。 */
+	uint8_t ucBoundaryReady; /*!< 保留的边界准备状态字段。 */
+	AppOtaHttpState_e xState; /*!< 当前解析或响应阶段。 */
+	char acHeader[APP_OTA_HTTP_HEADER_CAP]; /*!< HTTP 请求头缓存。 */
+	char acPartHeader[APP_OTA_HTTP_PART_HEADER_CAP]; /*!< 文件段头缓存。 */
+	char acBoundary[APP_OTA_HTTP_BOUNDARY_CAP + 1U]; /*!< 边界文本。 */
+	uint8_t aucMarker[APP_OTA_HTTP_MARKER_CAP]; /*!< 结束边界完整标记。 */
+	uint8_t aucHold[APP_OTA_HTTP_MARKER_CAP]; /*!< 边界识别滑动缓存。 */
 } AppOtaHttpSession_t;
 
-static struct tcp_pcb *s_pxListener;
-static uint8_t s_ucInitRequested;
-static AppOtaHttpSession_t s_xSession;
+static struct tcp_pcb *s_pxListener; /*!< HTTP 监听 TCP 控制块。 */
+static uint8_t s_ucInitRequested; /*!< 非零表示监听初始化已提交到 tcpip 线程。 */
+static AppOtaHttpSession_t s_xSession; /*!< 单连接静态会话。 */
 
+/** @brief 浏览器访问根路径时返回的固件上传表单。 */
 static const char s_acUploadPage[] =
 	"HTTP/1.0 200 OK\r\n"
 	"Content-Type: text/html\r\n"
@@ -80,6 +90,7 @@ static const char s_acUploadPage[] =
 	"enctype=\"multipart/form-data\">"
 	"<input type=\"file\" name=\"file\" accept=\".bin\">"
 	"<input type=\"submit\" value=\"Upload\"></form></body></html>";
+/** @brief 固件提交成功后返回的复位提示页面。 */
 static const char s_acSuccessPage[] =
 	"HTTP/1.0 200 OK\r\n"
 	"Content-Type: text/html\r\n"
@@ -87,11 +98,13 @@ static const char s_acSuccessPage[] =
 	"<html><body><h2>Upload complete</h2>"
 	"<p>MCU Reset Done</p>"
 	"<p>Device will reboot shortly.</p></body></html>";
+/** @brief 请求格式不合法时返回的拒绝页面。 */
 static const char s_acBadRequestPage[] =
 	"HTTP/1.0 400 Bad Request\r\n"
 	"Content-Type: text/html\r\n"
 	"Connection: close\r\n\r\n"
 	"<html><body><h2>OTA rejected</h2></body></html>";
+/** @brief 固件处理失败时返回的服务器错误页面。 */
 static const char s_acServerErrorPage[] =
 	"HTTP/1.0 500 Internal Server Error\r\n"
 	"Content-Type: text/html\r\n"
@@ -134,10 +147,16 @@ static void prvWriteLogField(AppLogLevel_e xLevel, const char *pcText,
 static void prvReportLwipFailure(int32_t lNativeError);
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  使用 OTA 配置的来源写入普通日志。
+  * @param[in] xLevel 日志级别。
+  * @param[in] pcText 稳定事件文本。
+  * @param[in] lCode 事件结果或诊断码。
+  */
 static void prvWriteLog(AppLogLevel_e xLevel, const char *pcText,
 	int32_t lCode)
 {
-	const AppOtaConfig_t *pxConfig;
+	const AppOtaConfig_t *pxConfig; /*!< 当前已绑定的 OTA 产品配置。 */
 
 	pxConfig = pxAppOtaGetConfig();
 	if (pxConfig != NULL) {
@@ -146,10 +165,18 @@ static void prvWriteLog(AppLogLevel_e xLevel, const char *pcText,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  使用 OTA 配置的来源写入带命名字段的日志。
+  * @param[in] xLevel 日志级别。
+  * @param[in] pcText 稳定事件文本。
+  * @param[in] lCode 事件结果或诊断码。
+  * @param[in] pcField 诊断字段名。
+  * @param[in] lFieldValue 诊断字段值。
+  */
 static void prvWriteLogField(AppLogLevel_e xLevel, const char *pcText,
 	int32_t lCode, const char *pcField, int32_t lFieldValue)
 {
-	const AppOtaConfig_t *pxConfig;
+	const AppOtaConfig_t *pxConfig; /*!< 当前已绑定的 OTA 产品配置。 */
 
 	pxConfig = pxAppOtaGetConfig();
 	if (pxConfig != NULL) {
@@ -159,9 +186,13 @@ static void prvWriteLogField(AppLogLevel_e xLevel, const char *pcText,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  调用产品回调报告一次 LwIP 资源相关错误。
+  * @param[in] lNativeError LwIP 返回的原始错误码。
+  */
 static void prvReportLwipFailure(int32_t lNativeError)
 {
-	const AppOtaConfig_t *pxConfig;
+	const AppOtaConfig_t *pxConfig; /*!< 当前已绑定的 OTA 产品配置。 */
 
 	pxConfig = pxAppOtaGetConfig();
 	if ((pxConfig != NULL) && (pxConfig->pxLwipFailureHook != NULL)) {
@@ -170,9 +201,14 @@ static void prvReportLwipFailure(int32_t lNativeError)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在 tcpip 线程排队创建 Raw LwIP HTTP 监听器。
+  * @retval pdPASS 监听器已存在或初始化回调已成功排队。
+  * @retval pdFAIL OTA 未配置或 tcpip 回调排队失败。
+  */
 BaseType_t xAppOtaHttpInitialize(void)
 {
-	err_t xError;
+	err_t xError; /*!< tcpip 回调排队结果。 */
 
 	if (pxAppOtaGetConfig() == NULL) {
 		return pdFAIL;
@@ -193,6 +229,13 @@ BaseType_t xAppOtaHttpInitialize(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  查询当前 HTTP 会话或 Flash 写入标志是否占用 OTA。
+  * @retval 0 当前会话与 Flash 标志均未占用。
+  * @retval 非零 上传会话、会话内复位标志或 Flash 写入仍活动。
+  * @note   响应发送后连接可先关闭，复位定时器仍在等待；
+  *         此时本接口可能返回 0，不能据此判断复位计划已取消。
+  */
 uint8_t ucAppOtaHttpIsActive(void)
 {
 	return (uint8_t)((s_xSession.ucUploadActive != 0U) ||
@@ -201,11 +244,15 @@ uint8_t ucAppOtaHttpIsActive(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在 tcpip 线程创建、绑定并启动 OTA HTTP 监听器。
+  * @param[in] pvArgument tcpip 回调保留参数，本实现不使用。
+  */
 static void prvInitListener(void *pvArgument)
 {
-	struct tcp_pcb *pxPcb;
-	err_t xError;
-	const AppOtaConfig_t *pxConfig;
+	struct tcp_pcb *pxPcb; /*!< 创建并逐步转为监听状态的 TCP 控制块。 */
+	err_t xError; /*!< 端口绑定结果。 */
+	const AppOtaConfig_t *pxConfig; /*!< 提供监听端口和日志来源的配置。 */
 
 	(void)pvArgument;
 	pxConfig = pxAppOtaGetConfig();
@@ -243,6 +290,15 @@ static void prvInitListener(void *pvArgument)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  接受唯一客户端连接并安装该连接的 Raw TCP 回调。
+  * @param[in] pvArgument 监听器回调参数，本实现不使用。
+  * @param[in] pxPcb 新建立的客户端 TCP 控制块。
+  * @param[in] xError LwIP 接受连接时的状态。
+  * @retval ERR_OK 连接已接管并完成回调安装。
+  * @retval ERR_ABRT 会话被占用或控制块无效，连接已中止。
+  * @retval 其他值 原样返回 LwIP 提供的接受错误。
+  */
 static err_t prvAccept(void *pvArgument, struct tcp_pcb *pxPcb,
 	err_t xError)
 {
@@ -270,9 +326,14 @@ static err_t prvAccept(void *pvArgument, struct tcp_pcb *pxPcb,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  处理连接异常释放，必要时终止尚未完成的 Flash 会话。
+  * @param[in] pvArgument 指向当前静态会话的回调参数。
+  * @param[in] xError 导致连接释放的 LwIP 错误码。
+  */
 static void prvConnectionError(void *pvArgument, err_t xError)
 {
-	AppOtaHttpSession_t *pxSession;
+	AppOtaHttpSession_t *pxSession; /*!< 从 Raw TCP 参数恢复的会话地址。 */
 
 	pxSession = (AppOtaHttpSession_t *)pvArgument;
 	if ((pxSession != NULL) && (pxSession->ucUploadActive != 0U)) {
@@ -284,9 +345,14 @@ static void prvConnectionError(void *pvArgument, err_t xError)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  移除连接回调并正常关闭或立即中止 TCP 连接。
+  * @param[in] pxPcb 待关闭的 TCP 控制块，允许为空。
+  * @param[in] ucAbort 非零时立即中止，否则先尝试正常关闭。
+  */
 static void prvClose(struct tcp_pcb *pxPcb, uint8_t ucAbort)
 {
-	err_t xError;
+	err_t xError; /*!< 正常关闭连接的 LwIP 结果。 */
 
 	if (pxPcb == NULL) {
 		return;
@@ -308,6 +374,10 @@ static void prvClose(struct tcp_pcb *pxPcb, uint8_t ucAbort)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  选择一个静态 HTTP 响应并将发送偏移复位到起点。
+  * @param[in] pcResponse 生命周期覆盖发送期的静态响应文本。
+  */
 static void prvSetResponse(const char *pcResponse)
 {
 	s_xSession.pcResponse = pcResponse;
@@ -317,11 +387,15 @@ static void prvSetResponse(const char *pcResponse)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  按当前 TCP 发送窗口提交尚未发送的响应片段。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  */
 static void prvSendResponse(struct tcp_pcb *pxPcb)
 {
-	u16_t usAvailable;
-	u16_t usLength;
-	err_t xError;
+	u16_t usAvailable; /*!< 当前 TCP 发送缓冲可用字节数。 */
+	u16_t usLength; /*!< 本次准备提交的响应字节数。 */
+	err_t xError; /*!< tcp_write 或 tcp_output 返回状态。 */
 
 	if ((pxPcb == NULL) || (s_xSession.pcResponse == NULL) ||
 		(s_xSession.usResponseOffset >= s_xSession.usResponseLength)) {
@@ -361,6 +435,13 @@ static void prvSendResponse(struct tcp_pcb *pxPcb)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在响应数据被确认后继续发送，全部确认后关闭连接。
+  * @param[in] pvArgument 当前连接参数，本实现不使用。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  * @param[in] usLength 本次确认的字节数，本实现不单独使用。
+  * @retval ERR_OK 回调处理完成。
+  */
 static err_t prvSent(void *pvArgument, struct tcp_pcb *pxPcb,
 	u16_t usLength)
 {
@@ -378,6 +459,12 @@ static err_t prvSent(void *pvArgument, struct tcp_pcb *pxPcb,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在 Raw TCP 轮询回调中继续推进受窗口限制的响应发送。
+  * @param[in] pvArgument 当前连接参数，本实现不使用。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  * @retval ERR_OK 轮询处理完成。
+  */
 static err_t prvPoll(void *pvArgument, struct tcp_pcb *pxPcb)
 {
 	(void)pvArgument;
@@ -388,6 +475,11 @@ static err_t prvPoll(void *pvArgument, struct tcp_pcb *pxPcb)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  执行提交成功后由 LwIP 定时器触发的系统复位。
+  * @param[in] pvArgument 定时器参数，本实现不使用。
+  * @warning 本函数不返回。
+  */
 static void prvReset(void *pvArgument)
 {
 	(void)pvArgument;
@@ -395,6 +487,11 @@ static void prvReset(void *pvArgument)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  检查请求头缓存末尾是否为连续两个回车换行。
+  * @retval 1 HTTP 请求头已经完整。
+  * @retval 0 请求头尚未收齐。
+  */
 static uint8_t prvHeaderComplete(void)
 {
 	if (s_xSession.usHeaderLength < 4U) {
@@ -407,10 +504,17 @@ static uint8_t prvHeaderComplete(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  跳过前导空白并解析无符号十进制 32 位数。
+  * @param[in] pcText 待解析文本。
+  * @param[out] pulValue 解析成功时接收数值。
+  * @retval 1 至少解析一位且未溢出。
+  * @retval 0 参数无效、没有数字或发生溢出。
+  */
 static uint8_t prvParseDecimal(const char *pcText, uint32_t *pulValue)
 {
-	uint32_t ulValue;
-	uint8_t ucDigits;
+	uint32_t ulValue; /*!< 十进制累加结果。 */
+	uint8_t ucDigits; /*!< 非零表示已读取至少一位数字。 */
 
 	if ((pcText == NULL) || (pulValue == NULL)) {
 		return 0U;
@@ -436,14 +540,21 @@ static uint8_t prvParseDecimal(const char *pcText, uint32_t *pulValue)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  对两个 ASCII 文本执行不区分大小写的子串查找。
+  * @param[in] pcText 被查找的完整文本。
+  * @param[in] pcNeedle 需要匹配的子串。
+  * @retval 1 找到完整子串。
+  * @retval 0 参数无效、子串为空或未找到。
+  */
 static uint8_t prvTextContains(const char *pcText, const char *pcNeedle)
 {
-	uint16_t usText;
-	uint16_t usNeedle;
-	uint16_t usIndex;
-	uint16_t usInner;
-	char cLeft;
-	char cRight;
+	uint16_t usText; /*!< 完整文本长度。 */
+	uint16_t usNeedle; /*!< 待匹配子串长度。 */
+	uint16_t usIndex; /*!< 当前候选起始位置。 */
+	uint16_t usInner; /*!< 候选位置内的字符偏移。 */
+	char cLeft; /*!< 转成小写后参与比较的完整文本字符。 */
+	char cRight; /*!< 转成小写后参与比较的子串字符。 */
 
 	if ((pcText == NULL) || (pcNeedle == NULL)) {
 		return 0U;
@@ -476,16 +587,17 @@ static uint8_t prvTextContains(const char *pcText, const char *pcNeedle)
 }
 
 /*-----------------------------------------------------------*/
+/** @brief 组合并记录当前默认网口的 OTA 上传地址。 */
 static void prvLogRequestUrl(void)
 {
-	char acIp[16];
-	char acUrl[64];
-	const char *pcPrefix;
-	const char *pcSuffix;
-	const ip4_addr_t *pxAddress;
-	uint16_t usLength;
-	uint16_t usPartLength;
-	uint8_t ucAddressReady;
+	char acIp[16]; /*!< 点分十进制 IPv4 地址文本。 */
+	char acUrl[64]; /*!< 最终上传地址文本。 */
+	const char *pcPrefix; /*!< URL 协议前缀。 */
+	const char *pcSuffix; /*!< OTA 上传路径。 */
+	const ip4_addr_t *pxAddress; /*!< 默认网口的 IPv4 地址。 */
+	uint16_t usLength; /*!< 当前已写入 URL 的字节数。 */
+	uint16_t usPartLength; /*!< 当前拼接片段的字节数。 */
+	uint8_t ucAddressReady; /*!< 非零表示已获得可用 IPv4 文本。 */
 
 	memset(acIp, 0, sizeof(acIp));
 	memset(acUrl, 0, sizeof(acUrl));
@@ -519,15 +631,21 @@ static void prvLogRequestUrl(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  清洗并分段记录被拒绝请求的有限接收文本。
+  * @param[in] pcPrefix 每条诊断记录的固定前缀。
+  * @param[in] pcData 接收缓存数据。
+  * @param[in] usLength 接收缓存有效字节数。
+  */
 static void prvLogReceivedText(const char *pcPrefix, const char *pcData,
 	uint16_t usLength)
 {
-	char acLine[APP_OTA_HTTP_LOG_TEXT_CAP];
-	uint16_t usOffset;
-	uint16_t usOutput;
-	uint16_t usPrefixLength;
-	uint16_t usLimit;
-	uint8_t ucByte;
+	char acLine[APP_OTA_HTTP_LOG_TEXT_CAP]; /*!< 单条清洗后的日志文本。 */
+	uint16_t usOffset; /*!< 输入诊断数据的读取偏移。 */
+	uint16_t usOutput; /*!< 当前日志行的写入偏移。 */
+	uint16_t usPrefixLength; /*!< 固定日志前缀长度。 */
+	uint16_t usLimit; /*!< 本次最多输出的输入字节数。 */
+	uint8_t ucByte; /*!< 正在清洗的输入字节。 */
 
 	if ((pcPrefix == NULL) || (pcData == NULL)) {
 		return;
@@ -563,6 +681,10 @@ static void prvLogReceivedText(const char *pcPrefix, const char *pcData,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  对指定拒绝原因记录上传地址和对应的原始请求片段。
+  * @param[in] lCode 区分 HTTP 头或 multipart 头失败的内部原因码。
+  */
 static void prvLogRejectedRequest(int32_t lCode)
 {
 	if (lCode == -5) {
@@ -586,13 +708,18 @@ static void prvLogRejectedRequest(int32_t lCode)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  解析 GET 或固件上传 POST 请求头并准备边界标记。
+  * @retval 1 请求方法、边界和正文长度均满足约束。
+  * @retval 0 请求头格式或长度约束不满足。
+  */
 static uint8_t prvParseHeader(void)
 {
-	char *pcBoundary;
-	char *pcEnd;
-	uint32_t ulLength;
-	uint16_t usLength;
-	const AppOtaConfig_t *pxConfig;
+	char *pcBoundary; /*!< 边界或 Content-Length 字段的解析位置。 */
+	char *pcEnd; /*!< multipart 边界文本的结束位置。 */
+	uint32_t ulLength; /*!< 请求声明的 HTTP 正文长度。 */
+	uint16_t usLength; /*!< multipart 边界文本长度。 */
+	const AppOtaConfig_t *pxConfig; /*!< 用于限定最大镜像长度的配置。 */
 
 	pxConfig = pxAppOtaGetConfig();
 	if (pxConfig == NULL) {
@@ -652,6 +779,11 @@ static uint8_t prvParseHeader(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  检查文件分段头缓存末尾是否为连续两个回车换行。
+  * @retval 1 分段头已经完整。
+  * @retval 0 分段头尚未收齐。
+  */
 static uint8_t prvPartHeaderComplete(void)
 {
 	if (s_xSession.usPartHeaderLength < 4U) {
@@ -665,6 +797,10 @@ static uint8_t prvPartHeaderComplete(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  复位 multipart 文件段解析计数并进入分段头阶段。
+  * @retval 1 状态准备完成。
+  */
 static uint8_t prvPrepareMultipart(void)
 {
 	s_xSession.usPartHeaderLength = 0U;
@@ -676,9 +812,15 @@ static uint8_t prvPrepareMultipart(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  接收一个文件段头字节，完整后校验文件名并启动 Flash 会话。
+  * @param[in] ucByte 当前接收字节。
+  * @retval 1 字节已接收或文件段头已通过校验。
+  * @retval 0 缓存溢出、文件类型不合法或 Flash 会话启动失败。
+  */
 static uint8_t prvProcessPartHeaderByte(uint8_t ucByte)
 {
-	AppOtaResult_e xResult;
+	AppOtaResult_e xResult; /*!< Flash 上传会话启动结果。 */
 
 	if (s_xSession.usPartHeaderLength >=
 		(APP_OTA_HTTP_PART_HEADER_CAP - 1U)) {
@@ -705,9 +847,14 @@ static uint8_t prvProcessPartHeaderByte(uint8_t ucByte)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  将保持缓存最早的一个字节提交给 Flash 写入器。
+  * @retval 1 字节写入成功并更新进度。
+  * @retval 0 Flash 写入器拒绝或写入失败。
+  */
 static uint8_t prvFlushHoldByte(void)
 {
-	AppOtaResult_e xResult;
+	AppOtaResult_e xResult; /*!< 单字节追加到 Flash 写入器的结果。 */
 
 	xResult = xAppOtaFlashWrite(s_xSession.aucHold, 1U);
 	if (xResult != APP_OTA_RESULT_OK) {
@@ -723,12 +870,18 @@ static uint8_t prvFlushHoldByte(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  完成镜像校验提交，安排复位并开始发送成功响应。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  * @retval 1 固件提交成功并已安排响应与复位。
+  * @retval 0 固件校验或提交失败，错误响应已启动。
+  */
 static uint8_t prvFinishUpload(struct tcp_pcb *pxPcb)
 {
-	AppOtaResult_e xResult;
-	uint32_t ulCrc;
-	uint32_t ulSize;
-	const AppOtaConfig_t *pxConfig;
+	AppOtaResult_e xResult; /*!< 固件镜像校验和提交结果。 */
+	uint32_t ulCrc; /*!< 提交成功的镜像 CRC。 */
+	uint32_t ulSize; /*!< 提交成功的镜像精确字节数。 */
+	const AppOtaConfig_t *pxConfig; /*!< 提供提交后复位延时的配置。 */
 
 	xResult = xAppOtaFlashFinish(&ulCrc, &ulSize);
 	if (xResult != APP_OTA_RESULT_OK) {
@@ -749,6 +902,13 @@ static uint8_t prvFinishUpload(struct tcp_pcb *pxPcb)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  滑动匹配 multipart 结束边界并持续写入确定为数据的字节。
+  * @param[in] ucByte 当前接收的正文数据字节。
+  * @retval 0 保持缓存或 Flash 写入失败。
+  * @retval 1 字节已处理，仍在接收镜像。
+  * @retval 2 已匹配完整结束边界，镜像数据结束。
+  */
 static uint8_t prvProcessDataByte(uint8_t ucByte)
 {
 	if (s_xSession.usHoldLength >= APP_OTA_HTTP_MARKER_CAP) {
@@ -773,6 +933,12 @@ static uint8_t prvProcessDataByte(uint8_t ucByte)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  终止活动上传、记录失败信息并开始发送错误响应。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  * @param[in] pcLogText 失败事件文本。
+  * @param[in] lCode 失败结果或内部诊断码。
+  */
 static void prvFailUpload(struct tcp_pcb *pxPcb, const char *pcLogText,
 	int32_t lCode)
 {
@@ -789,16 +955,25 @@ static void prvFailUpload(struct tcp_pcb *pxPcb, const char *pcLogText,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  消费接收 pbuf 链并按会话阶段解析请求、分段头和镜像数据。
+  * @param[in] pvArgument 当前连接参数，本实现不使用。
+  * @param[in] pxPcb 当前客户端 TCP 控制块。
+  * @param[in] pxPbuf 本次收到的 pbuf 链；为空表示对端关闭连接。
+  * @param[in] xError LwIP 接收状态。
+  * @retval ERR_OK 数据已确认并释放，或连接已正常关闭。
+  * @retval 其他值 原样返回接收错误。
+  */
 static err_t prvReceive(void *pvArgument, struct tcp_pcb *pxPcb,
 	struct pbuf *pxPbuf, err_t xError)
 {
-	struct pbuf *pxPart;
-	uint16_t usIndex;
-	uint16_t usPartLength;
-	uint16_t usOffset;
-	uint8_t *pucPayload;
-	uint8_t ucResult;
-	uint8_t ucByte;
+	struct pbuf *pxPart; /*!< 当前遍历的 pbuf 分段。 */
+	uint16_t usIndex; /*!< 当前 pbuf 内的字节索引。 */
+	uint16_t usPartLength; /*!< 当前 pbuf 分段的有效字节数。 */
+	uint16_t usOffset; /*!< 向 TCP 确认的整条 pbuf 链字节数。 */
+	uint8_t *pucPayload; /*!< 当前 pbuf 的数据地址。 */
+	uint8_t ucResult; /*!< 固件数据字节处理结果。 */
+	uint8_t ucByte; /*!< 当前解析的接收字节。 */
 
 	(void)pvArgument;
 	if (xError != ERR_OK) {
@@ -814,11 +989,13 @@ static err_t prvReceive(void *pvArgument, struct tcp_pcb *pxPcb,
 		prvClose(pxPcb, 0U);
 		return ERR_OK;
 	}
+	/* 步骤 1：遍历 pbuf 链，并按当前状态逐字节驱动解析器。 */
 	for (pxPart = pxPbuf; pxPart != NULL; pxPart = pxPart->next) {
 		pucPayload = (uint8_t *)pxPart->payload;
 		usPartLength = pxPart->len;
 		for (usIndex = 0U; usIndex < usPartLength; usIndex++) {
 			ucByte = pucPayload[usIndex];
+			/* 步骤 2：收齐请求头，区分上传页 GET 与固件 POST。 */
 			if (s_xSession.xState == APP_OTA_HTTP_HEADER) {
 				if (s_xSession.usHeaderLength >=
 					(APP_OTA_HTTP_HEADER_CAP - 1U)) {
@@ -843,6 +1020,7 @@ static err_t prvReceive(void *pvArgument, struct tcp_pcb *pxPcb,
 				(void)prvPrepareMultipart();
 				continue;
 			}
+			/* 步骤 3：验证 multipart 文件段头并启动 Flash 写入。 */
 			if (s_xSession.xState == APP_OTA_HTTP_PART_HEADER) {
 				if (prvProcessPartHeaderByte(ucByte) == 0U) {
 					prvFailUpload(pxPcb, "OTA_HTTP_REJECTED", -6);
@@ -850,6 +1028,7 @@ static err_t prvReceive(void *pvArgument, struct tcp_pcb *pxPcb,
 				}
 				continue;
 			}
+			/* 步骤 4：流式写入镜像，匹配结束边界后提交并响应。 */
 			if (s_xSession.xState == APP_OTA_HTTP_DATA) {
 				ucResult = prvProcessDataByte(ucByte);
 				if (ucResult == 0U) {
@@ -863,6 +1042,7 @@ static err_t prvReceive(void *pvArgument, struct tcp_pcb *pxPcb,
 			}
 		}
 	}
+	/* 步骤 5：确认并释放整条接收链。 */
 	usOffset = pxPbuf->tot_len;
 	tcp_recved(pxPcb, usOffset);
 	pbuf_free(pxPbuf);

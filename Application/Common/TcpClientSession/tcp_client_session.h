@@ -1,17 +1,15 @@
 /**
   * @file      tcp_client_session.h
-  * @brief     Define a static TCP client connection lifecycle helper.
+  * @brief     定义静态 TCP 客户端连接生命周期管理接口。
   * @author    WHong
-  * @date      2026-08-27
+  * @date      2026-09-24
   *
-  * @details   The owner task calls this module periodically. It opens one
-  *            Transport channel, verifies the application protocol once, and
-  *            applies bounded reconnect backoff without creating a task,
-  *            queue, or dynamic object.
+  * @details   所属任务周期调用处理接口；模块负责打开一个 Transport
+  *            通道、验证一次应用协议，并按配置执行有上限的重连退避。
   *
   * @attention
-  * - One owner task must serialize Process and ForceReconnect calls.
-  * - The probe may reset a session handshake, but must not issue physical actions.
+  * - 同一所属任务必须串行调用处理和强制重连接口。
+  * - 协议探测可以重置会话握手，但不得触发物理动作。
   */
 
 #ifndef TCP_CLIENT_SESSION_H
@@ -26,88 +24,62 @@ extern "C" {
 #include "FreeRTOS.h"
 #include "transport.h"
 
-/** @brief Define the sole lifecycle state for one TCP client session. */
+/** @brief 表示一个 TCP 客户端会话的生命周期状态。 */
 typedef enum {
-	TCP_CLIENT_SESSION_NETWORK_WAIT = 0,
-	TCP_CLIENT_SESSION_BACKOFF = 1,
-	TCP_CLIENT_SESSION_CONNECTING = 2,
-	TCP_CLIENT_SESSION_PROTOCOL_CHECK = 3,
-	TCP_CLIENT_SESSION_ONLINE = 4
+	TCP_CLIENT_SESSION_NETWORK_WAIT = 0, /*!< 等待产品网络就绪。 */
+	TCP_CLIENT_SESSION_BACKOFF = 1, /*!< 等待本次重连退避截止。 */
+	TCP_CLIENT_SESSION_CONNECTING = 2, /*!< 正在打开 Transport 通道。 */
+	TCP_CLIENT_SESSION_PROTOCOL_CHECK = 3, /*!< 正在验证应用层协议。 */
+	TCP_CLIENT_SESSION_ONLINE = 4 /*!< 协议探测通过，可执行业务命令。 */
 } TcpClientSessionState_e;
 
-/** @brief Read whether the shared product network is ready for TCP use. */
+/** @brief 查询产品网络是否可供 TCP 客户端使用。 */
 typedef uint8_t (*TcpClientSessionNetworkReadyFn_t)(void *pvOwnerContext);
 
-/** @brief Check protocol availability; an owner may initialize its session handshake. */
+/** @brief 检查应用协议是否可用，所属模块可在回调中初始化握手。 */
 typedef int32_t (*TcpClientSessionProbeFn_t)(void *pvOwnerContext,
 	uint32_t ulTimeoutMs);
 
-/** @brief Report a lifecycle transition from the owning product module. */
+/** @brief 向所属产品模块报告一次生命周期状态切换。 */
 typedef void (*TcpClientSessionEventFn_t)(void *pvOwnerContext,
 	TcpClientSessionState_e xPreviousState,
 	TcpClientSessionState_e xCurrentState, int32_t lReason,
 	uint32_t ulAttempt, uint32_t ulRetryDelayMs);
 
-/** @brief Define immutable behavior shared by static client instances. */
+/** @brief 保存静态客户端实例使用的不可变行为配置。 */
 typedef struct {
-	TcpClientSessionNetworkReadyFn_t ucNetworkReady;
-	TcpClientSessionProbeFn_t lProtocolProbe;
-	TcpClientSessionEventFn_t vEvent;
-	const uint32_t *pulRetryDelayMs;
-	uint8_t ucRetryDelayCount;
-	uint32_t ulProbeTimeoutMs;
+	TcpClientSessionNetworkReadyFn_t ucNetworkReady; /*!< 网络就绪查询回调。 */
+	TcpClientSessionProbeFn_t lProtocolProbe; /*!< 应用协议探测回调。 */
+	TcpClientSessionEventFn_t vEvent; /*!< 可选的状态切换通知回调。 */
+	const uint32_t *pulRetryDelayMs; /*!< 重连退避时长表，单位为毫秒。 */
+	uint8_t ucRetryDelayCount; /*!< 退避时长表的有效项数。 */
+	uint32_t ulProbeTimeoutMs; /*!< 单次协议探测超时，单位为毫秒。 */
 } TcpClientSessionConfig_t;
 
-/** @brief Store caller-owned runtime state for one TCP client session. */
+/** @brief 保存由调用方持有的单个 TCP 客户端会话运行状态。 */
 typedef struct {
-	const TcpClientSessionConfig_t *pxConfig;
-	TransportChannel_t *pxChannel;
-	void *pvOwnerContext;
-	TcpClientSessionState_e xState;
-	TickType_t xNextActionTick;
-	TransportResult_e xLastTransportResult;
-	int32_t lLastProbeResult;
-	uint32_t ulAttemptCount;
-	uint32_t ulConsecutiveFailures;
-	uint32_t ulNextRetryDelayMs;
-	uint8_t ucInitialized;
+	const TcpClientSessionConfig_t *pxConfig; /*!< 不可变的会话配置。 */
+	TransportChannel_t *pxChannel; /*!< 会话独占使用的 Transport 通道。 */
+	void *pvOwnerContext; /*!< 原样传给产品回调的上下文。 */
+	TcpClientSessionState_e xState; /*!< 当前生命周期状态。 */
+	TickType_t xNextActionTick; /*!< 允许下次连接尝试的系统节拍。 */
+	TransportResult_e xLastTransportResult; /*!< 最近一次通道操作结果。 */
+	int32_t lLastProbeResult; /*!< 最近一次协议探测结果。 */
+	uint32_t ulAttemptCount; /*!< 自初始化以来发起的连接尝试次数。 */
+	uint32_t ulConsecutiveFailures; /*!< 当前连续连接或探测失败次数。 */
+	uint32_t ulNextRetryDelayMs; /*!< 当前采用的退避时长，单位为毫秒。 */
+	uint8_t ucInitialized; /*!< 非零表示实例已经完成初始化。 */
 } TcpClientSession_t;
 
-/**
-  * @brief  Initialize a caller-owned static TCP client session.
-  * @param[out] pxSession Runtime storage owned by one owner task.
-  * @param[in] pxConfig Immutable static configuration.
-  * @param[in] pxChannel Registered TCP Transport client channel.
-  * @param[in] pvOwnerContext Context passed to every configured callback.
-  * @retval pdPASS Initialization completed.
-  * @retval pdFAIL A required configuration field is invalid.
-  */
 BaseType_t xTcpClientSessionInit(TcpClientSession_t *pxSession,
 	const TcpClientSessionConfig_t *pxConfig, TransportChannel_t *pxChannel,
 	void *pvOwnerContext);
 
-/**
-  * @brief Advance one non-business TCP client lifecycle transition.
-  * @param[in,out] pxSession Initialized session owned by the current task.
-  * @note The caller remains responsible for yielding between Process calls.
-  */
 void vTcpClientSessionProcess(TcpClientSession_t *pxSession);
 
-/**
-  * @brief Close the active channel and schedule a capped reconnect attempt.
-  * @param[in,out] pxSession Initialized session owned by the current task.
-  * @param[in] lReason Product-level reason that invalidated the TCP session.
-  * @note Do not call for a valid Modbus exception response.
-  */
 void vTcpClientSessionForceReconnect(TcpClientSession_t *pxSession,
 	int32_t lReason);
 
-/**
-  * @brief Test whether the session passed the initial protocol availability check.
-  * @param[in] pxSession Initialized session, or NULL.
-  * @retval 1 The session is ONLINE.
-  * @retval 0 The session is not available for business commands.
-  */
 uint8_t ucTcpClientSessionIsOnline(const TcpClientSession_t *pxSession);
 
 #ifdef __cplusplus

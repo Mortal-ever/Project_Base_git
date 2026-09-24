@@ -1,8 +1,8 @@
 /**
   * @file      coffee3_device.c
-  * @brief     Implement Coffee3 device binding, queue routing, and events.
+  * @brief     实现 Coffee3 设备绑定、命令路由、状态与完成事件。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   */
 
 #include "coffee3_device.h"
@@ -17,58 +17,66 @@
 #include "coffee3_workflow.h"
 #include "task.h"
 
-/** @brief Robot route plus addressable RTU route slots through Bus5. */
+/** @brief 机器人路由与第二至第五路 RTU 路由的槽位总数。 */
 #define COFFEE3_ROUTE_COUNT                  6U
 #define COFFEE3_TERMINAL_HISTORY_COUNT       \
 	(COFFEE3_COMMAND_QUEUE_LENGTH + 2U)
 
 #include "coffee3_device_bindings.h"
 
-/** @brief Bounded completion history; match both sequence and generation. */
+/** @brief 保存有界命令完成历史，查询时同时匹配序号与订单代次。 */
 typedef struct {
-	uint32_t ulCommandId;
-	uint32_t ulOrderEpoch;
-	int32_t lResult;
-	uint16_t usAction;
-	uint8_t ucTimedOut;
-	uint8_t ucValid;
+	uint32_t ulCommandId; /*!< 提交时分配的非零命令序号。 */
+	uint32_t ulOrderEpoch; /*!< 命令归属与协作取消使用的代次。 */
+	int32_t lResult; /*!< 设备拥有者返回的原始终态结果。 */
+	uint16_t usAction; /*!< 已完成的产品动作编号。 */
+	uint8_t ucTimedOut; /*!< 非零表示失败按超时分类。 */
+	uint8_t ucValid; /*!< 非零表示本历史槽保存有效终态。 */
 } Coffee3TerminalSnapshot_t;
 
-/** @brief Public device status table. */
+/** @brief 按逻辑设备编号索引的公共运行状态表。 */
 COFFEE3_CCM_DATA
 Coffee3DeviceStatus_t
 	g_axCoffee3DeviceStatus[COFFEE3_DEVICE_COUNT];
 
-/** @brief Independent static EventGroup storage for every real device. */
+/** @brief 每个实际设备独立使用的静态事件组存储区。 */
 COFFEE3_CCM_DATA
 static StaticEventGroup_t
 	s_axDeviceEventStorage[COFFEE3_DEVICE_COUNT];
-/** @brief Independent EventGroup handles indexed by device ID. */
+/** @brief 按设备编号索引的独立事件组句柄。 */
 COFFEE3_CCM_DATA
 static EventGroupHandle_t
 	s_axDeviceEvents[COFFEE3_DEVICE_COUNT];
-/** @brief Task-owned queues indexed by immutable route ID. */
+/** @brief 按固定路由编号索引、由设备任务拥有的命令队列。 */
 COFFEE3_CCM_DATA
 static QueueHandle_t s_axRouteQueues[COFFEE3_ROUTE_COUNT];
-/** @brief Monotonic command identifier assigned at submission. */
+/** @brief 提交命令时递增分配的命令序号，跳过零值。 */
 COFFEE3_CCM_DATA
 static uint32_t s_ulNextCommandId;
-/** @brief Latest workflow epoch requested to stop cooperatively. */
+/** @brief 最近一次请求协作取消的工作流订单代次。 */
 COFFEE3_CCM_DATA
 static volatile uint32_t s_ulCanceledOrderEpoch;
-/** @brief Nonzero after device event initialization succeeds. */
+/** @brief 非零表示所有设备事件组已经成功初始化。 */
 COFFEE3_CCM_DATA
 static uint8_t s_ucInitialized;
 COFFEE3_CCM_DATA
 static Coffee3TerminalSnapshot_t
 	s_aaxTerminalHistory[COFFEE3_DEVICE_COUNT]
-	[COFFEE3_TERMINAL_HISTORY_COUNT];
+	[COFFEE3_TERMINAL_HISTORY_COUNT]; /*!< 各设备最近的有界完成历史。 */
 COFFEE3_CCM_DATA
 static uint8_t s_aucTerminalHistoryHead[COFFEE3_DEVICE_COUNT];
+	/*!< 各设备下一次写入完成历史的槽位。 */
 
 static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks, uint8_t ucUrgent);
 
+/**
+  * @brief  把原始命令终态转换为工作流等待使用的事件位。
+  * @param[in] lResult 设备拥有者返回的原始结果。
+  * @param[in] ucTimedOut 非零表示结果按超时分类。
+  * @param[in] usAction 已完成的产品动作。
+  * @retval EventBits_t 与该终态对应的完成、失败、超时或取消事件位。
+  */
 static EventBits_t prvTerminalBits(int32_t lResult,
 	uint8_t ucTimedOut, uint16_t usAction)
 {
@@ -92,11 +100,19 @@ static EventBits_t prvTerminalBits(int32_t lResult,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  查询指定设备、订单代次和命令序号对应的历史终态结果。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @param[in] ulOrderEpoch 命令归属与协作取消使用的代次。
+  * @param[in] ulCommandId 非零命令序号。
+  * @param[out] pucValid 查询有效标志；可为空。
+  * @retval int32_t 命中时返回原始终态结果；未命中时返回零且有效标志清零。
+  */
 int32_t lCoffee3DeviceGetTerminalResult(Coffee3DeviceId_e xDeviceId,
 	uint32_t ulOrderEpoch, uint32_t ulCommandId, uint8_t *pucValid)
 {
-	uint8_t ucIndex;
-	int32_t lResult;
+	uint8_t ucIndex; /*!< 当前搜索的历史槽位。 */
+	int32_t lResult; /*!< 命中的原始结果，未命中时保持零。 */
 
 	if (pucValid != NULL) {
 		*pucValid = 0U;
@@ -105,8 +121,7 @@ int32_t lCoffee3DeviceGetTerminalResult(Coffee3DeviceId_e xDeviceId,
 		(xDeviceId >= COFFEE3_DEVICE_COUNT)) {
 		return 0;
 	}
-	/* Search committed history under the same lock as owner publication.
-	 * Missing records return zero with validity clear, not confirmed success. */
+	/* 与拥有者发布使用同一临界区搜索；零结果只有在有效标志置位时才代表成功。 */
 	lResult = 0;
 	taskENTER_CRITICAL();
 	for (ucIndex = 0U; ucIndex < COFFEE3_TERMINAL_HISTORY_COUNT;
@@ -129,9 +144,14 @@ int32_t lCoffee3DeviceGetTerminalResult(Coffee3DeviceId_e xDeviceId,
 
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  创建每个逻辑设备的静态事件组并清空运行状态。
+  * @retval pdPASS 设备事件与状态初始化完成，或此前已经完成。
+  * @retval pdFAIL 任一静态事件组创建失败。
+  */
 BaseType_t xCoffee3DeviceInitialize(void)
 {
-	uint8_t ucIndex;
+	uint8_t ucIndex; /*!< 当前创建事件组的设备编号。 */
 
 	if (s_ucInitialized != 0U) {
 		return pdPASS;
@@ -156,6 +176,11 @@ BaseType_t xCoffee3DeviceInitialize(void)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  注册由设备任务拥有的一条命令路由队列。
+  * @param[in] ucRouteId 固定路由编号。
+  * @param[in] xQueue 生命周期覆盖设备服务期的队列句柄。
+  */
 void vCoffee3DeviceRegisterRoute(uint8_t ucRouteId, QueueHandle_t xQueue)
 {
 	if ((ucRouteId >= COFFEE3_ROUTE_COUNT) || (xQueue == NULL)) {
@@ -165,10 +190,16 @@ void vCoffee3DeviceRegisterRoute(uint8_t ucRouteId, QueueHandle_t xQueue)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  查找指定逻辑设备的固定通信绑定。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @retval 非空 与设备对应的只读静态绑定。
+  * @retval NULL 设备没有绑定。
+  */
 const Coffee3DeviceBinding_t *pxCoffee3DeviceGetBinding(
 	Coffee3DeviceId_e xDeviceId)
 {
-	uint8_t ucIndex;
+	uint8_t ucIndex; /*!< 当前检查的设备绑定索引。 */
 
 	for (ucIndex = 0U;
 		ucIndex < (uint8_t)(sizeof(s_axBindings) /
@@ -182,6 +213,15 @@ const Coffee3DeviceBinding_t *pxCoffee3DeviceGetBinding(
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  把命令提交到设备绑定选择的普通队列位置。
+  * @param[in,out] pxCommand 待提交命令；返回 pdFAIL 前也可能已分配非零命令序号。
+  * @param[in] xWaitTicks 等待队列空间的最大 RTOS 节拍数。
+  * @retval pdPASS 命令已复制进路由队列或机器人延迟槽。
+  * @retval pdFAIL 参数、绑定、路由或队列无效，或队列未接收命令。
+  * @note pdPASS 只表示命令已排队，不表示设备已经执行成功。
+  * @note 普通队列提交失败时，已申请的人工占用标志会回退。
+  */
 BaseType_t xCoffee3CommandSubmit(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks)
 {
@@ -189,6 +229,14 @@ BaseType_t xCoffee3CommandSubmit(Coffee3Command_t *pxCommand,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  把紧急命令提交到设备路由队列前端。
+  * @param[in,out] pxCommand 待提交命令；返回 pdFAIL 前也可能已分配非零命令序号。
+  * @param[in] xWaitTicks 等待队列空间的最大 RTOS 节拍数。
+  * @retval pdPASS 命令已复制进路由队列或机器人延迟槽。
+  * @retval pdFAIL 参数、绑定、路由或队列无效，或队列未接收命令。
+  * @note pdPASS 只表示命令已排队，不表示设备已经执行成功；本接口不要求安全停止标志。
+  */
 BaseType_t xCoffee3CommandSubmitUrgent(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks)
 {
@@ -196,6 +244,10 @@ BaseType_t xCoffee3CommandSubmitUrgent(Coffee3Command_t *pxCommand,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布需要协作取消的非零命令归属代次。
+  * @param[in] ulOrderEpoch 待取消命令归属代次；零值会被忽略。
+  */
 void vCoffee3OrderCancelRequest(uint32_t ulOrderEpoch)
 {
 	if (ulOrderEpoch == 0U) {
@@ -207,6 +259,12 @@ void vCoffee3OrderCancelRequest(uint32_t ulOrderEpoch)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  判断工作流命令是否属于已取消订单代次。
+  * @param[in] pxCommand 设备任务当前拥有的命令；可为空。
+  * @retval 1 命令应在下一个协作检查点停止。
+  * @retval 0 命令不受当前取消请求影响，或属于安全停止动作。
+  */
 uint8_t ucCoffee3CommandIsCanceled(const Coffee3Command_t *pxCommand)
 {
 	if ((pxCommand != NULL) &&
@@ -232,12 +290,20 @@ uint8_t ucCoffee3CommandIsCanceled(const Coffee3Command_t *pxCommand)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  完成命令编号分配、人工占用申请与路由队列提交。
+  * @param[in,out] pxCommand 待提交命令；成功前会写入命令序号与标志。
+  * @param[in] xWaitTicks 等待路由队列空间的最大节拍数。
+  * @param[in] ucUrgent 非零时提交到队列前端。
+  * @retval pdPASS 命令已排队或已交给机器人延迟槽。
+  * @retval pdFAIL 校验、人工占用申请或队列提交失败。
+  */
 static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks, uint8_t ucUrgent)
 {
-	const Coffee3DeviceBinding_t *pxBinding;
-	QueueHandle_t xQueue;
-	BaseType_t xResult;
+	const Coffee3DeviceBinding_t *pxBinding; /*!< 命令目标设备的固定绑定。 */
+	QueueHandle_t xQueue; /*!< 绑定选择的设备拥有者队列。 */
+	BaseType_t xResult; /*!< 队列或机器人延迟槽的提交结果。 */
 
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucDeviceId == (uint8_t)COFFEE3_DEVICE_NONE) ||
@@ -254,7 +320,7 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 	if (xQueue == NULL) {
 		return pdFAIL;
 	}
-	/* Allocate a nonzero identity before copying the message into its queue. */
+	/* 步骤 1：在复制到队列前分配不会为零的命令序号。 */
 	if (pxCommand->ulCommandId == 0U) {
 		taskENTER_CRITICAL();
 		s_ulNextCommandId++;
@@ -264,8 +330,7 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 		pxCommand->ulCommandId = s_ulNextCommandId;
 		taskEXIT_CRITICAL();
 	}
-	/* Robot motion debug uses the Robot owner's single deferred slot. Body
-	 * controls stay on the normal route because they only require TCP. */
+	/* 步骤 2：机器人运动调试进入拥有者的单一延迟槽，基础控制仍走普通路由。 */
 	if ((pxCommand->ucDeviceId == (uint8_t)COFFEE3_DEVICE_ROBOT) &&
 		(pxCommand->ucSource == (uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) &&
 		((pxCommand->ucFlags & COFFEE3_COMMAND_FLAG_DEBUG) != 0U) &&
@@ -281,13 +346,11 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 			return pdFAIL;
 		}
 		pxCommand->ucFlags |= COFFEE3_COMMAND_FLAG_MANUAL_RESERVED;
-		/* Scheduling uses command origin, never the log order identifier.
-		 * Read-only refresh stays normal priority on the same route. */
+		/* 步骤 3：服务端命令申请人工占用；只读刷新保持普通优先级。 */
 		ucUrgent = (pxCommand->usAction != COFFEE3_ACTION_REFRESH) ?
 			1U : 0U;
 	}
-	/* Queue insertion copies all fields; it does not preempt an active IO.
-	 * A failed insertion must return any acquired manual reservation. */
+	/* 步骤 4：队列复制完整命令但不抢占当前 IO；失败时归还人工占用。 */
 	xResult = (ucUrgent != 0U) ?
 		xQueueSendToFront(xQueue, pxCommand, xWaitTicks) :
 		xQueueSend(xQueue, pxCommand, xWaitTicks);
@@ -300,12 +363,16 @@ static BaseType_t prvSubmit(Coffee3Command_t *pxCommand,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布命令开始状态并清除上一轮终态事件。
+  * @param[in] pxCommand 设备任务即将执行的命令。
+  */
 void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand)
 {
-	Coffee3DeviceStatus_t *pxStatus;
-	const Coffee3DeviceBinding_t *pxBinding;
-	EventGroupHandle_t xEvents;
-	uint8_t ucDeviceId;
+	Coffee3DeviceStatus_t *pxStatus; /*!< 目标设备的公共状态。 */
+	const Coffee3DeviceBinding_t *pxBinding; /*!< 目标设备的固定绑定。 */
+	EventGroupHandle_t xEvents; /*!< 目标设备的独立事件组。 */
+	uint8_t ucDeviceId; /*!< 经校验的目标设备编号。 */
 
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucDeviceId == (uint8_t)COFFEE3_DEVICE_NONE) ||
@@ -344,15 +411,22 @@ void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布命令终态、原始结果、事件分类与完成历史。
+  * @param[in] pxCommand 已完成的命令。
+  * @param[in] lResult 设备拥有者返回的原始结果，零表示成功。
+  * @param[in] ucTimedOut 非零表示失败按超时分类。
+  * @note 终态需结合 ucTerminalValid 或历史查询有效标志判断。
+  */
 void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	int32_t lResult, uint8_t ucTimedOut)
 {
-	Coffee3DeviceStatus_t *pxStatus;
-	const Coffee3DeviceBinding_t *pxBinding;
-	EventGroupHandle_t xEvents;
-	EventBits_t xSetBits;
-	uint8_t ucDeviceId;
-	uint8_t ucHistoryIndex;
+	Coffee3DeviceStatus_t *pxStatus; /*!< 目标设备的公共状态。 */
+	const Coffee3DeviceBinding_t *pxBinding; /*!< 目标设备的固定绑定。 */
+	EventGroupHandle_t xEvents; /*!< 目标设备的独立事件组。 */
+	EventBits_t xSetBits; /*!< 本次完成需要发布的事件位集合。 */
+	uint8_t ucDeviceId; /*!< 经校验的目标设备编号。 */
+	uint8_t ucHistoryIndex; /*!< 本次写入的完成历史槽位。 */
 
 	if ((pxCommand == NULL) ||
 		(pxCommand->ucDeviceId == (uint8_t)COFFEE3_DEVICE_NONE) ||
@@ -403,8 +477,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	}
 
 	taskENTER_CRITICAL();
-	/* Commit identity and result before waking consumers. The bounded ring
-	 * retains completions even if a following refresh replaces live status. */
+	/* 步骤 1：先提交命令身份与原始结果，再唤醒等待者。 */
 	ucHistoryIndex = s_aucTerminalHistoryHead[ucDeviceId];
 	s_aaxTerminalHistory[ucDeviceId][ucHistoryIndex].ulCommandId =
 		pxCommand->ulCommandId;
@@ -442,9 +515,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 		pxStatus->ucRobotPhase = (uint8_t)COFFEE3_ROBOT_PHASE_IDLE;
 		pxStatus->ucRobotAccepted = 0U;
 	}
-	/* RTU online/offline is owned by the Bus health poll. A foreground
-	 * command completion, including a protocol/device fault, must not turn a
-	 * device online or keep an offline device online by side effect. */
+	/* 步骤 2：前台命令不改写 RTU 的 ucOnline 字段；成功终态仍会置 ONLINE 事件位。 */
 	if (lResult == 0) {
 		pxStatus->ulLastSuccessTick = (uint32_t)xTaskGetTickCount();
 	} else {
@@ -457,7 +528,7 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	if (pxCommand->ucSource ==
 		(uint8_t)COFFEE3_COMMAND_SOURCE_SERVER) {
 		if (lResult == COFFEE3_COMMAND_RESULT_SUPERSEDED) {
-			/* The Robot owner logs previous and replacement actions together. */
+			/* 机器人拥有者会把被替换动作与新动作合并记录。 */
 		} else if (lResult == COFFEE3_COMMAND_RESULT_CANCELED) {
 			(void)xCoffee3LogPrintfOrder(COFFEE3_LOG_LEVEL_WARNING,
 				COFFEE3_LOG_SOURCE_SERVER,
@@ -491,6 +562,10 @@ void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布机器人当前事务阶段。
+  * @param[in] xPhase 不超过恢复阶段的机器人事务阶段。
+  */
 void vCoffee3DeviceSetRobotPhase(Coffee3RobotPhase_e xPhase)
 {
 	if (xPhase > COFFEE3_ROBOT_PHASE_RECOVERING) {
@@ -503,6 +578,10 @@ void vCoffee3DeviceSetRobotPhase(Coffee3RobotPhase_e xPhase)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  发布机器人是否已经接受当前命令。
+  * @param[in] ucAccepted 非零表示已观察到接受边沿。
+  */
 void vCoffee3DeviceSetRobotAccepted(uint8_t ucAccepted)
 {
 	taskENTER_CRITICAL();
@@ -512,10 +591,15 @@ void vCoffee3DeviceSetRobotAccepted(uint8_t ucAccepted)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  设置设备控制就绪状态并同步就绪事件位。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @param[in] ucReady 非零表示设备允许接受业务动作。
+  */
 void vCoffee3DeviceSetReady(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucReady)
 {
-	EventGroupHandle_t xEvents;
+	EventGroupHandle_t xEvents; /*!< 目标设备的独立事件组。 */
 
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
 		(xDeviceId >= COFFEE3_DEVICE_COUNT)) {
@@ -534,10 +618,15 @@ void vCoffee3DeviceSetReady(Coffee3DeviceId_e xDeviceId,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  设置设备命令是否正在等待链路恢复。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @param[in] ucRecovering 非零表示当前命令保持忙并等待恢复。
+  */
 void vCoffee3DeviceSetRecovering(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucRecovering)
 {
-	EventGroupHandle_t xEvents;
+	EventGroupHandle_t xEvents; /*!< 目标设备的独立事件组。 */
 
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
 		(xDeviceId >= COFFEE3_DEVICE_COUNT)) {
@@ -557,10 +646,15 @@ void vCoffee3DeviceSetRecovering(Coffee3DeviceId_e xDeviceId,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  设置设备通信在线状态并同步通信故障事件位。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @param[in] ucOnline 非零表示设备通信拥有者确认链路在线。
+  */
 void vCoffee3DeviceSetOnline(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucOnline)
 {
-	EventGroupHandle_t xEvents;
+	EventGroupHandle_t xEvents; /*!< 目标设备的独立事件组。 */
 
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
 		(xDeviceId >= COFFEE3_DEVICE_COUNT)) {
@@ -593,6 +687,11 @@ void vCoffee3DeviceSetOnline(Coffee3DeviceId_e xDeviceId,
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  读取指定设备当前的事件组位。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @retval EventBits_t 当前事件位；设备无效或未初始化时返回零。
+  */
 EventBits_t xCoffee3DeviceGetEvents(Coffee3DeviceId_e xDeviceId)
 {
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
@@ -604,15 +703,23 @@ EventBits_t xCoffee3DeviceGetEvents(Coffee3DeviceId_e xDeviceId)
 }
 
 /*-----------------------------------------------------------*/
+/**
+  * @brief  在限定时间内等待指定命令身份对应的终态。
+  * @param[in] xDeviceId 逻辑设备编号。
+  * @param[in] ulOrderEpoch 预期命令归属代次。
+  * @param[in] ulCommandId 预期非零命令序号。
+  * @param[in] xWaitTicks 最大等待 RTOS 节拍数。
+  * @retval EventBits_t 匹配命令的终态事件；参数无效或超时返回零。
+  */
 EventBits_t xCoffee3DeviceWaitCommand(Coffee3DeviceId_e xDeviceId,
 	uint32_t ulOrderEpoch, uint32_t ulCommandId, TickType_t xWaitTicks)
 {
-	EventBits_t xBits;
-	Coffee3DeviceStatus_t xStatus;
-	TickType_t xWaitStart;
-	TickType_t xRemaining;
-	EventBits_t xTerminal;
-	uint8_t ucIndex;
+	EventBits_t xBits; /*!< 本轮事件组等待返回的唤醒位。 */
+	Coffee3DeviceStatus_t xStatus; /*!< 临界区内复制的设备状态快照。 */
+	TickType_t xWaitStart; /*!< 本次等待开始的 RTOS 节拍。 */
+	TickType_t xRemaining; /*!< 当前剩余的等待节拍预算。 */
+	EventBits_t xTerminal; /*!< 精确匹配命令身份后的终态事件。 */
+	uint8_t ucIndex; /*!< 当前搜索的完成历史槽位。 */
 
 	if ((xDeviceId <= COFFEE3_DEVICE_NONE) ||
 		(xDeviceId >= COFFEE3_DEVICE_COUNT) ||
@@ -620,8 +727,7 @@ EventBits_t xCoffee3DeviceWaitCommand(Coffee3DeviceId_e xDeviceId,
 		(ulCommandId == 0U)) {
 		return 0U;
 	}
-	/* Event bits are only wakeups. Search history and retained snapshots
-	 * for the exact (epoch, command id), within this call's tick budget. */
+	/* 事件位只负责唤醒；在同一总预算内精确匹配归属代次与命令序号。 */
 	xWaitStart = xTaskGetTickCount();
 	for (;;) {
 		taskENTER_CRITICAL();
@@ -672,8 +778,7 @@ EventBits_t xCoffee3DeviceWaitCommand(Coffee3DeviceId_e xDeviceId,
 			(xRemaining > pdMS_TO_TICKS(100U)) ?
 				pdMS_TO_TICKS(100U) : xRemaining);
 		if ((xBits & COFFEE3_DEVICE_EVENT_TERMINAL) != 0U) {
-			/* Event bits are wakeups, not transaction identity. A latched
-			 * unrelated result must not spin and starve the bus owner. */
+			/* 无关终态可能保持置位，短暂让出 CPU，避免空转影响总线拥有者。 */
 			vTaskDelay(1U);
 		}
 	}

@@ -1,17 +1,15 @@
 /**
   * @file      app_log.h
-  * @brief     Define the product-neutral asynchronous application log core.
+  * @brief     定义与产品无关的异步应用日志核心接口。
   * @author    WHong
-  * @date      2026-08-20
+  * @date      2026-09-24
   *
-  * @details   Producers submit bounded structured records to one static
-  *            overwrite-oldest ring. A caller-owned Transport channel is
-  *            used by the single consumer task for output.
+  * @details   生产者向静态覆盖最旧项环形缓冲提交定长结构化记录，唯一消费
+  *            任务通过调用方持有的 Transport 通道输出。
   *
   * @attention
-  * - The write API is task-context only and never allocates memory.
-  * - Product-specific source identifiers and Transport setup belong to the
-  *   Target adapter, not to this core.
+  * - 写入接口仅供任务上下文调用，且不分配动态内存。
+  * - 产品日志来源编号和 Transport 配置由产品适配层负责。
   */
 
 #ifndef APP_LOG_H
@@ -25,197 +23,103 @@ extern "C" {
 
 #include "transport.h"
 
-/** @brief Define application log service results. */
+/** @brief 表示应用日志服务操作结果。 */
 typedef enum {
 	APP_LOG_RESULT_OK = 0,
-		/*!< The operation completed successfully. */
+		/*!< 操作成功完成。 */
 	APP_LOG_RESULT_ALREADY_INITIALIZED = 1,
-		/*!< The log service was already initialized. */
+		/*!< 日志服务此前已经初始化。 */
 	APP_LOG_RESULT_INVALID_ARG = -1,
-		/*!< A pointer, level, or source was invalid. */
+		/*!< 指针、级别或来源编号不合法。 */
 	APP_LOG_RESULT_NOT_READY = -2,
-		/*!< The ring or signal is not available. */
+		/*!< 环形缓冲或通知信号尚未就绪。 */
 	APP_LOG_RESULT_QUEUE_FULL = -3,
-		/*!< Retained for adapters that expose the legacy result contract. */
+		/*!< 为仍公开旧结果约定的适配层保留。 */
 	APP_LOG_RESULT_TRANSPORT = -4
-		/*!< The Transport output is unavailable. */
+		/*!< Transport 输出通道不可用。 */
 } AppLogResult_e;
 
-/** @brief Define log severity without a debug level. */
+/** @brief 表示不包含调试级别的日志严重程度。 */
 typedef enum {
-	APP_LOG_LEVEL_INFO = 0,
-	APP_LOG_LEVEL_WARNING = 1,
-	APP_LOG_LEVEL_ERROR = 2,
-	APP_LOG_LEVEL_COUNT = 3
+	APP_LOG_LEVEL_INFO = 0, /*!< 正常运行信息。 */
+	APP_LOG_LEVEL_WARNING = 1, /*!< 可继续运行但需要关注的异常。 */
+	APP_LOG_LEVEL_ERROR = 2, /*!< 操作失败或状态错误。 */
+	APP_LOG_LEVEL_COUNT = 3 /*!< 有效日志级别数量。 */
 } AppLogLevel_e;
 
-/** @brief Identify one product-defined application log source. */
+/** @brief 表示由产品定义的日志来源编号。 */
 typedef uint8_t AppLogSourceId_t;
 
-/** @brief Identify the Host order associated with one log record. */
+/** @brief 表示与日志记录关联的主机订单编号。 */
 typedef uint16_t AppLogOrderId_t;
 
-/** @brief Describe the stable text labels for one log source. */
+/** @brief 保存一个日志来源的稳定文本标签。 */
 typedef struct {
-	const char *pcTaskName; /*!< Task label written in the log prefix. */
-	const char *pcModuleName; /*!< Module label written in the log prefix. */
+	const char *pcTaskName; /*!< 写入日志前缀的任务标签。 */
+	const char *pcModuleName; /*!< 写入日志前缀的模块标签。 */
 } AppLogSourceDescriptor_t;
 
-/** @brief Bind source labels and one optional output Transport channel. */
+/** @brief 绑定产品来源标签和一个可选的输出 Transport 通道。 */
 typedef struct {
 	const AppLogSourceDescriptor_t *pxSourceTable;
-		/*!< Product-owned source table stored in read-only memory. */
+		/*!< 产品持有且保存在只读存储器中的来源表。 */
 	uint8_t ucSourceCount;
-		/*!< Number of valid entries in pxSourceTable. */
+		/*!< 来源表中的有效项数。 */
 	TransportChannel_t *pxTransportChannel;
-		/*!< Product-owned channel and context, or NULL for buffer-only mode. */
+		/*!< 产品持有的通道；仅缓冲模式时为空。 */
 	uint8_t ucEnableTransport;
-		/*!< Nonzero requests Transport open during initialization. */
+		/*!< 非零表示初始化时请求打开 Transport。 */
 } AppLogConfig_t;
 
-/** @brief Store observable log counters for product monitoring. */
+/** @brief 保存供产品监控的日志运行状态和累计计数。 */
 typedef struct {
-	uint32_t ulQueuedCount; /*!< Records accepted by the ring. */
-	uint32_t ulSentCount; /*!< Records transmitted successfully. */
-	uint32_t ulDroppedCount; /*!< Oldest records overwritten by new writes. */
-	uint32_t ulTransmitFailureCount; /*!< Transport transmission failures. */
-	int32_t lLastTransportError; /*!< Latest normalized Transport result. */
-	uint32_t ulRetryCount; /*!< Bounded output retries after send failures. */
-	uint16_t usPendingCount; /*!< Records currently waiting in the ring. */
+	uint32_t ulQueuedCount; /*!< 环形缓冲累计接收的记录数。 */
+	uint32_t ulSentCount; /*!< 已成功发送并提交移除的记录数。 */
+	uint32_t ulDroppedCount; /*!< 因缓冲已满而被覆盖的最旧记录数。 */
+	uint32_t ulTransmitFailureCount; /*!< Transport 发送失败次数。 */
+	int32_t lLastTransportError; /*!< 最近一次归一化 Transport 结果。 */
+	uint32_t ulRetryCount; /*!< 发送失败后的累计重试次数。 */
+	uint16_t usPendingCount; /*!< 当前等待输出的记录数。 */
 	uint16_t usQueueHighWatermark;
-		/*!< Maximum observed pending record count. */
-	uint8_t ucInitialized; /*!< Nonzero after the ring and signal are ready. */
-	uint8_t ucBufferReady; /*!< Static ring storage is available. */
-	uint8_t ucTransportReady; /*!< Transport can currently send. */
-	uint8_t ucTaskReady; /*!< The product log task entered its loop. */
-	uint8_t ucOutputPaused; /*!< Output is paused while Transport is retried. */
+		/*!< 已观察到的最大等待记录数。 */
+	uint8_t ucInitialized; /*!< 非零表示环形缓冲和信号已经初始化。 */
+	uint8_t ucBufferReady; /*!< 非零表示静态环形缓冲可用。 */
+	uint8_t ucTransportReady; /*!< 非零表示 Transport 当前可发送。 */
+	uint8_t ucTaskReady; /*!< 非零表示产品日志任务已经进入运行。 */
+	uint8_t ucOutputPaused; /*!< 非零表示输出当前暂停或不可用。 */
 } AppLogStatus_t;
 
-/** @brief Global public status stored by the one application log instance. */
+/** @brief 唯一应用日志实例公开的运行状态。 */
 extern AppLogStatus_t g_xAppLogStatus;
 
-/**
-  * @brief  Initialize the static ring, signal, and optional Transport.
-  * @param[in]  pxConfig Product source table and Transport binding.
-  * @retval APP_LOG_RESULT_OK The ring and requested Transport are ready.
-  * @retval APP_LOG_RESULT_ALREADY_INITIALIZED Initialization ran before.
-  * @retval APP_LOG_RESULT_INVALID_ARG A source table or count was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Static ring or signal creation failed.
-  * @retval APP_LOG_RESULT_TRANSPORT The ring is ready but Transport output
-  *         is disabled or could not be opened.
-  * @note   Call after the Transport manager has been initialized.
-  */
 AppLogResult_e xAppLogInit(const AppLogConfig_t *pxConfig);
 
-/**
-  * @brief  Submit one bounded record without blocking the caller.
-  * @param[in]  xLevel Record severity.
-  * @param[in]  xSource Product-defined source identifier.
-  * @param[in]  pcText Null-terminated event text copied into the record.
-  * @param[in]  lCode Source-specific result, error, or diagnostic code.
-  * @retval APP_LOG_RESULT_OK The ring accepted the record, overwriting its
-  *         oldest record when full.
-  * @retval APP_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @warning Do not call this interface from an interrupt.
-  */
 AppLogResult_e xAppLogWrite(AppLogLevel_e xLevel,
 	AppLogSourceId_t xSource, const char *pcText, int32_t lCode);
 
-/**
-  * @brief  Submit one bounded record with an explicit order identifier.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Product-defined source identifier.
-  * @param[in] usOrderId Host order, debug order, or system order identifier.
-  * @param[in] pcText Null-terminated event text copied into the record.
-  * @param[in] lCode Source-specific result, error, or diagnostic code.
-  * @retval APP_LOG_RESULT_OK The ring accepted the record.
-  * @retval APP_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @warning Do not call this interface from an interrupt.
-  */
 AppLogResult_e xAppLogWriteOrder(AppLogLevel_e xLevel,
 	AppLogSourceId_t xSource, AppLogOrderId_t usOrderId,
 	const char *pcText, int32_t lCode);
 
-/**
-  * @brief  Submit one record with one named diagnostic field.
-  * @param[in]  xLevel Record severity.
-  * @param[in]  xSource Product-defined source identifier.
-  * @param[in]  pcText Null-terminated event text copied into the record.
-  * @param[in]  lResult Normalized operation or state result.
-  * @param[in]  pcFieldName Optional field name, or NULL for no field.
-  * @param[in]  lFieldValue Field value when pcFieldName is not NULL.
-  * @retval APP_LOG_RESULT_OK The ring accepted the record, overwriting its
-  *         oldest record when full.
-  * @retval APP_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @warning Do not call this interface from an interrupt.
-  */
 AppLogResult_e xAppLogWriteField(AppLogLevel_e xLevel,
 	AppLogSourceId_t xSource, const char *pcText, int32_t lResult,
 	const char *pcFieldName, int32_t lFieldValue);
 
-/**
-  * @brief  Submit one named record with an explicit order identifier.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Product-defined source identifier.
-  * @param[in] usOrderId Host order, debug order, or system order identifier.
-  * @param[in] pcText Null-terminated event text copied into the record.
-  * @param[in] lResult Normalized operation or state result.
-  * @param[in] pcFieldName Optional field name, or NULL for no field.
-  * @param[in] lFieldValue Field value when pcFieldName is not NULL.
-  * @retval APP_LOG_RESULT_OK The ring accepted the record.
-  * @retval APP_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @warning Do not call this interface from an interrupt.
-  */
 AppLogResult_e xAppLogWriteFieldOrder(AppLogLevel_e xLevel,
 	AppLogSourceId_t xSource, AppLogOrderId_t usOrderId,
 	const char *pcText, int32_t lResult, const char *pcFieldName,
 	int32_t lFieldValue);
 
-/**
-  * @brief  Submit one human-readable record without a result suffix.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Product-defined source identifier.
-  * @param[in] usOrderId Host order, debug order, or system order.
-  * @param[in] pcText Null-terminated text copied into the record.
-  * @retval APP_LOG_RESULT_OK The ring accepted the record.
-  * @retval APP_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval APP_LOG_RESULT_NOT_READY Initialization is incomplete.
-  */
 AppLogResult_e xAppLogWriteTextOrder(AppLogLevel_e xLevel,
 	AppLogSourceId_t xSource, AppLogOrderId_t usOrderId,
 	const char *pcText);
 
-/**
-  * @brief  Write one bounded startup probe through the configured channel.
-  * @param[in]  pucData Bytes to transmit.
-  * @param[in]  usLength Number of bytes to transmit.
-  * @retval 0 Transmission completed.
-  * @return Negative normalized Transport result on failure.
-  * @note   Call only after xAppLogInit().
-  */
 int32_t lAppLogEarlyWrite(const uint8_t *pucData, uint16_t usLength);
 
-/**
-  * @brief  Run the sole application log output owner task.
-  * @param[in]  pvArgument Unused task argument.
-  * @note   The product adapter owns task creation and naming.
-  */
 void vAppLogTask(void *pvArgument);
 
-/**
-  * @brief  Publish the result of product log task creation.
-  * @param[in]  ucCreated Nonzero when task creation returned pdPASS.
-  */
 void vAppLogSetTaskReady(uint8_t ucCreated);
 
-/**
-  * @brief  Copy a consistent application log status snapshot.
-  * @param[out] pxStatus Caller-owned status destination; ignored when NULL.
-  */
 void vAppLogGetStatus(AppLogStatus_t *pxStatus);
 
 #ifdef __cplusplus

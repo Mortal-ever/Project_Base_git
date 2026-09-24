@@ -1,8 +1,8 @@
 /**
   * @file coffee3_device_bindings.h
-  * @brief Coffee3-only immutable device selection, routing and diagnostic names.
-  * @date 2026-09-07
-  * @note Included only by coffee3_device.c; no runtime registration.
+  * @brief 定义 Coffee3 固定的设备选择、路由与诊断名称。
+  * @date 2026-09-24
+  * @note 本文件只由 coffee3_device.c 包含，不执行运行时注册。
   */
 #ifndef COFFEE3_DEVICE_BINDINGS_H
 #define COFFEE3_DEVICE_BINDINGS_H
@@ -20,7 +20,7 @@
 	DEVICE_DRIVER_ROBOT_DOBOT_PROTOCOL_1
 #endif
 
-/** @brief Immutable product device-to-bus binding table. */
+/** @brief 产品设备到通信总线的固定绑定表。 */
 static const Coffee3DeviceBinding_t s_axBindings[] = {
 	{ COFFEE3_DEVICE_ROBOT, 0U, COFFEE3_ROBOT_UNIT_ID, 0U,
 		DEVICE_CATEGORY_ROBOT, DEVICE_ROLE_ROBOT_1,

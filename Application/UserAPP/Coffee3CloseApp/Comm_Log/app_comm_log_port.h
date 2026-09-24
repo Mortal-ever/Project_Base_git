@@ -1,8 +1,8 @@
 /**
   * @file      app_comm_log_port.h
-  * @brief     Provide the Coffee3 fatal-path USART1 compatibility port.
+  * @brief     声明 Coffee3 致命故障路径使用的 USART1 兼容端口。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   */
 
 #ifndef APP_COMM_LOG_PORT_H
@@ -14,13 +14,6 @@ extern "C" {
 
 #include <stdint.h>
 
-/**
-  * @brief Write a frozen crash report without RTOS, DMA, or interrupts.
-  * @param[in] pucData Report bytes.
-  * @param[in] usLength Number of report bytes.
-  * @retval 0 Transmission completed.
-  * @return Negative value on invalid state or bounded spin timeout.
-  */
 int32_t lAppCommLogPortCrashWrite(const uint8_t *pucData,
 	uint16_t usLength);
 

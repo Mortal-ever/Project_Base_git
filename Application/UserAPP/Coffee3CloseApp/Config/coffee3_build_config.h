@@ -1,13 +1,11 @@
 /**
   * @file      coffee3_build_config.h
-  * @brief     Select Coffee3 target-specific nanoMODBUS features.
+  * @brief     选择 Coffee3 目标使用的 nanoMODBUS 功能。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   *
-  * @details   The Coffee3 Keil target pre-includes this header in every
-  *            translation unit. The vendor configuration include guard is
-  *            intentionally defined here so client and server structure
-  *            layouts remain identical without editing vendored middleware.
+  * @details   Coffee3 Keil 目标会在每个编译单元中预包含本文件。这里主动定义
+  *            厂商配置保护宏，使客户端与服务端结构布局一致且无需修改中间件。
   */
 
 #ifndef COFFEE3_BUILD_CONFIG_H

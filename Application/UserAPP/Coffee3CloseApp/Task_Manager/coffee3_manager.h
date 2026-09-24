@@ -1,8 +1,8 @@
 /**
-  * @file      app_task_manager.h
-  * @brief     Define the Coffee3 startup task manager interface.
+  * @file      coffee3_manager.h
+  * @brief     定义 Coffee3 启动任务管理器接口。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   */
 
 #ifndef COFFEE3_MANAGER_H
@@ -14,17 +14,17 @@ extern "C" {
 
 #include <stdint.h>
 
-/** @brief Define Coffee3 task-manager startup results. */
+/** @brief 定义 Coffee3 任务管理器启动结果。 */
 typedef enum {
-	APP_TASK_MANAGER_RESULT_OK = 0,               // 启动成功
-	APP_TASK_MANAGER_RESULT_ALREADY_CREATED = 1,  // 任务管理器已经创建过
-	APP_TASK_MANAGER_RESULT_NO_RESOURCE = -1,     // 系统资源不足
-	APP_TASK_MANAGER_RESULT_LOG_INIT = -2,        // 日志子系统初始化失败
-	APP_TASK_MANAGER_RESULT_SERIAL_INIT = -3,     // 串行通信模块初始化失败
-	APP_TASK_MANAGER_RESULT_MODULE_INIT = -4      // 产品模块初始化失败
+	APP_TASK_MANAGER_RESULT_OK = 0, /*!< 启动成功。 */
+	APP_TASK_MANAGER_RESULT_ALREADY_CREATED = 1, /*!< 已经完成过创建。 */
+	APP_TASK_MANAGER_RESULT_NO_RESOURCE = -1, /*!< 事件组或必需任务资源不足。 */
+	APP_TASK_MANAGER_RESULT_LOG_INIT = -2, /*!< 兼容保留的日志初始化失败结果。 */
+	APP_TASK_MANAGER_RESULT_SERIAL_INIT = -3, /*!< 业务串口默认配置失败。 */
+	APP_TASK_MANAGER_RESULT_MODULE_INIT = -4 /*!< 产品模块初始化失败。 */
 } AppTaskManagerResult_e;
 
-/** @brief Identify Coffee3 application tasks in startup masks. */
+/** @brief 标识启动状态掩码中的 Coffee3 应用任务。 */
 #define APP_TASK_MASK_LOG                    (1UL << 0)
 #define APP_TASK_MASK_SERVER                 (1UL << 1)
 #define APP_TASK_MASK_ROBOT                  (1UL << 2)
@@ -35,60 +35,30 @@ typedef enum {
 #define APP_TASK_MASK_WORKFLOW               (1UL << 7)
 #define APP_TASK_MASK_ALL                    0x000000FFUL
 
-/** @brief Store observable Coffee3 startup and network readiness. */
+/** @brief 保存可查询的 Coffee3 启动状态与网络就绪状态。 */
 typedef struct {
-	AppTaskManagerResult_e xStartResult; /*!< Software startup result, not physical initialization outcome. */
-	uint32_t ulResetCause; /*!< Captured RCC reset-cause mask before hardware flags are cleared. */
-	uint32_t ulTaskCreatedMask; /*!< Task bits successfully created during startup. */
-	uint32_t ulTaskFailedMask; /*!< Task bits whose resource allocation failed. */
-	uint32_t ulFreeHeapBeforeTasks; /*!< FreeRTOS free heap bytes before task allocation. */
-	uint32_t ulFreeHeapAfterTasks; /*!< FreeRTOS free heap bytes after task allocation. */
-	uint8_t ucInfrastructureCreated; /*!< Prevents repeating completed module construction. */
-	uint8_t ucTasksCreated; /*!< Core task creation sequence completed successfully. */
-	uint8_t ucLogReady; /*!< Log Transport and C3Log task are ready. */
-	uint8_t ucDeviceReady; /*!< Device software events/routes initialized; no hardware proof. */
-	uint8_t ucServerReady; /*!< Server software initialized; no client required yet. */
-	uint8_t ucRobotReady; /*!< Robot software initialized; transport may still be offline. */
-	uint8_t ucRtuReady; /*!< RTU queues initialized; UART owner opens later in its task. */
-	uint8_t ucWorkflowReady; /*!< Order/service software initialized; residual check is later. */
-	uint8_t ucNetworkStackReady; /*!< Default task has returned from lwIP initialization. */
-	uint8_t ucNetworkReady; /*!< Current link, netif and IPv4 readiness, updated periodically. */
+	AppTaskManagerResult_e xStartResult; /*!< 软件启动结果，不代表物理设备初始化结果。 */
+	uint32_t ulResetCause; /*!< 清除 RCC 标志前捕获的复位原因位。 */
+	uint32_t ulTaskCreatedMask; /*!< 启动期间成功创建的任务位。 */
+	uint32_t ulTaskFailedMask; /*!< 因资源不足而创建失败的任务位。 */
+	uint32_t ulFreeHeapBeforeTasks; /*!< 创建任务前的 FreeRTOS 空闲堆字节数。 */
+	uint32_t ulFreeHeapAfterTasks; /*!< 创建任务后的 FreeRTOS 空闲堆字节数。 */
+	uint8_t ucInfrastructureCreated; /*!< 防止重复构造已完成的模块。 */
+	uint8_t ucTasksCreated; /*!< 核心任务创建序列是否成功完成。 */
+	uint8_t ucLogReady; /*!< 日志传输与日志任务是否都已就绪。 */
+	uint8_t ucDeviceReady; /*!< 设备软件事件与路由已初始化，不证明硬件就绪。 */
+	uint8_t ucServerReady; /*!< 服务端软件已初始化，不要求已有客户端。 */
+	uint8_t ucRobotReady; /*!< 机器人软件已初始化，传输仍可能离线。 */
+	uint8_t ucRtuReady; /*!< RTU 队列已初始化，串口由任务稍后打开。 */
+	uint8_t ucWorkflowReady; /*!< 工作流软件已初始化，残杯检查稍后执行。 */
+	uint8_t ucNetworkStackReady; /*!< 默认任务已从 LwIP 初始化返回。 */
+	uint8_t ucNetworkReady; /*!< 周期更新的链路、接口与 IPv4 综合就绪状态。 */
 } AppTaskManagerStatus_t;
 
-/**
-  * @brief  Create Coffee3 static startup infrastructure.
-  * @retval APP_TASK_MANAGER_RESULT_OK Infrastructure was created.
-  * @retval APP_TASK_MANAGER_RESULT_ALREADY_CREATED Creation ran before.
-  * @retval APP_TASK_MANAGER_RESULT_NO_RESOURCE RTOS object creation failed.
-  * @retval APP_TASK_MANAGER_RESULT_LOG_INIT Log transport setup failed.
-  * @retval APP_TASK_MANAGER_RESULT_SERIAL_INIT UART override failed.
-  * @retval APP_TASK_MANAGER_RESULT_MODULE_INIT A product module failed.
-  * @note   Call once before the scheduler starts.
-  */
 AppTaskManagerResult_e xAppTaskManagerCreateTasks(void);
-
-/**
-  * @brief  Initialize and run Coffee3 services from the default task.
-  * @note   Call after MX_LWIP_Init(); this function never returns.
-  */
 void vAppTaskManagerRunDefaultTask(void);
-
-/**
-  * @brief  Block until the default task reports LwIP stack initialization.
-  */
 void vAppTaskManagerWaitNetworkStackReady(void);
-
-/**
-  * @brief  Read current link, netif, and IPv4 readiness.
-  * @retval 1 The network is ready.
-  * @retval 0 At least one network prerequisite is unavailable.
-  */
 uint8_t ucAppTaskManagerIsNetworkReady(void);
-
-/**
-  * @brief  Copy the current Coffee3 task-manager status.
-  * @param[out] pxStatus Caller-owned destination; ignored when NULL.
-  */
 void vAppTaskManagerGetStatus(AppTaskManagerStatus_t *pxStatus);
 
 #ifdef __cplusplus

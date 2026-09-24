@@ -1,11 +1,14 @@
 /**
   * @file      coffee3_io_names.h
-  * @brief     Define Coffee3 target-owned human-readable IO names.
+  * @brief     定义 Coffee3 产品使用的可读 IO 点位名称。
+  * @author    WHong
+  * @date      2026-09-24
   */
 
 #ifndef COFFEE3_IO_NAMES_H
 #define COFFEE3_IO_NAMES_H
 
+/** @brief 本机八路数字输入在日志与调试界面中的名称。 */
 #define COFFEE3_IO_NAME_LOCAL_DI_1   "DI1_OUTLET_DOOR_UPPER_LIMIT"
 #define COFFEE3_IO_NAME_LOCAL_DI_2   "DI2_OUTLET_DOOR_LOWER_LIMIT"
 #define COFFEE3_IO_NAME_LOCAL_DI_3   "DI3_COFFEE_WATER_TANK_HIGH_LEVEL"
@@ -15,6 +18,7 @@
 #define COFFEE3_IO_NAME_LOCAL_DI_7   "DI7_RESERVED"
 #define COFFEE3_IO_NAME_LOCAL_DI_8   "DI8_RESERVED"
 
+/** @brief 本机八路数字输出在日志与调试界面中的名称。 */
 #define COFFEE3_IO_NAME_LOCAL_DO_1   "DO1_OUTLET_DOOR_UP"
 #define COFFEE3_IO_NAME_LOCAL_DO_2   "DO2_OUTLET_DOOR_DOWN"
 #define COFFEE3_IO_NAME_LOCAL_DO_3   "DO3_HOT_WATER_SUPPLY_PUMP"
@@ -24,6 +28,7 @@
 #define COFFEE3_IO_NAME_LOCAL_DO_7   "DO7_RESERVED"
 #define COFFEE3_IO_NAME_LOCAL_DO_8   "DO8_RESERVED"
 
+/** @brief 外部 Unit 1 输入模块的十六路点位名称。 */
 #define COFFEE3_IO_NAME_MB1_DI_1    "X1_FINISHED_FRONT_CUP"
 #define COFFEE3_IO_NAME_MB1_DI_2    "X2_FINISHED_REAR_CUP"
 #define COFFEE3_IO_NAME_MB1_DI_3    "X3_OUTLET_CUP"
@@ -41,6 +46,7 @@
 #define COFFEE3_IO_NAME_MB1_DI_15   "X15_RESERVED"
 #define COFFEE3_IO_NAME_MB1_DI_16   "X16_RESERVED"
 
+/** @brief 外部 Unit 2 输出模块的十六路点位名称。 */
 #define COFFEE3_IO_NAME_MB2_DO_1    "Y1_WATER_HEATER_RELAY"
 #define COFFEE3_IO_NAME_MB2_DO_2    "Y2_RESERVED"
 #define COFFEE3_IO_NAME_MB2_DO_3    "Y3_RESERVED"

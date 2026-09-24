@@ -1,16 +1,15 @@
 /**
   * @file      coffee3_log.h
-  * @brief     Define the Coffee3 asynchronous USART1 log service.
+  * @brief     声明 Coffee3 异步 USART1 日志服务。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   *
-  * @details   Producers submit bounded structured records to one static
-  *            overwrite-oldest ring. The single log task owns USART1 output
-  *            through Transport.
+  * @details   生产者把定长结构化记录写入静态覆盖式环形缓冲区，唯一日志任务
+  *            通过 Transport 独占 USART1 输出。
   *
   * @attention
-  * - The write API is task-context only.
-  * - This module does not provide a debug command or UART receive interface.
+  * - 写入接口只能在任务上下文调用。
+  * - 本模块不提供调试命令或串口接收接口。
   */
 
 #ifndef COFFEE3_LOG_H
@@ -24,199 +23,78 @@ extern "C" {
 
 #include "Log/app_log.h"
 
-/** @brief Define Coffee3 log service results. */
+/** @brief 定义 Coffee3 日志服务结果。 */
 typedef enum {
-	COFFEE3_LOG_RESULT_OK = 0,
-		/*!< The operation completed successfully. */
-	COFFEE3_LOG_RESULT_ALREADY_INITIALIZED = 1,
-		/*!< The log service was already initialized. */
-	COFFEE3_LOG_RESULT_INVALID_ARG = -1,
-		/*!< A pointer, level, or source was invalid. */
-	COFFEE3_LOG_RESULT_NOT_READY = -2,
-		/*!< The log queue or USART1 transport is unavailable. */
-	COFFEE3_LOG_RESULT_QUEUE_FULL = -3,
-		/*!< The bounded log queue could not accept the record. */
-	COFFEE3_LOG_RESULT_TRANSPORT = -4
-		/*!< USART1 Transport creation or opening failed. */
+	COFFEE3_LOG_RESULT_OK = 0, /*!< 操作完成。 */
+	COFFEE3_LOG_RESULT_ALREADY_INITIALIZED = 1, /*!< 日志服务已经初始化。 */
+	COFFEE3_LOG_RESULT_INVALID_ARG = -1, /*!< 指针、级别或来源无效。 */
+	COFFEE3_LOG_RESULT_NOT_READY = -2, /*!< 环形缓冲区或传输端点未就绪。 */
+	COFFEE3_LOG_RESULT_QUEUE_FULL = -3, /*!< 兼容保留的队列已满结果。 */
+	COFFEE3_LOG_RESULT_TRANSPORT = -4 /*!< USART1 传输创建或打开失败。 */
 } Coffee3LogResult_e;
 
-/** @brief Define log severity without a debug level. */
+/** @brief 定义不含调试级别的日志严重程度。 */
 typedef enum {
-	COFFEE3_LOG_LEVEL_INFO = 0,
-	COFFEE3_LOG_LEVEL_WARNING = 1,
-	COFFEE3_LOG_LEVEL_ERROR = 2,
-	COFFEE3_LOG_LEVEL_COUNT = 3
+	COFFEE3_LOG_LEVEL_INFO = 0, /*!< 普通运行信息。 */
+	COFFEE3_LOG_LEVEL_WARNING = 1, /*!< 可恢复或需要关注的异常。 */
+	COFFEE3_LOG_LEVEL_ERROR = 2, /*!< 已导致操作失败的错误。 */
+	COFFEE3_LOG_LEVEL_COUNT = 3 /*!< 日志级别数量边界。 */
 } Coffee3LogLevel_e;
 
-/** @brief Identify system and manual command log order namespaces. */
+/** @brief 标识系统日志与人工调试日志使用的订单号命名空间。 */
 #define COFFEE3_LOG_ORDER_SYSTEM       0x0000U
 #define COFFEE3_LOG_ORDER_DEBUG        0xF123U
 
-/** @brief Identify the subsystem that submitted a Coffee3 log record. */
+/** @brief 标识提交 Coffee3 日志记录的子系统。 */
 typedef enum {
-	COFFEE3_LOG_SOURCE_SYSTEM = 0,
-	COFFEE3_LOG_SOURCE_SERVER = 1,
-	COFFEE3_LOG_SOURCE_WORKFLOW = 2,
-	COFFEE3_LOG_SOURCE_ROBOT = 3,
-	COFFEE3_LOG_SOURCE_BUS2 = 4,
-	COFFEE3_LOG_SOURCE_BUS3 = 5,
-	COFFEE3_LOG_SOURCE_BUS4 = 6,
-	COFFEE3_LOG_SOURCE_BUS5 = 7,
-	COFFEE3_LOG_SOURCE_IO = 8,
-	COFFEE3_LOG_SOURCE_COFFEE = 9,
-	COFFEE3_LOG_SOURCE_CUP = 10,
-	COFFEE3_LOG_SOURCE_SYRUP = 11,
-	COFFEE3_LOG_SOURCE_LID = 12,
-	COFFEE3_LOG_SOURCE_ICE = 13,
-	COFFEE3_LOG_SOURCE_WEIGH = 14,
-	COFFEE3_LOG_SOURCE_ENERGY_METER = 15,
-	COFFEE3_LOG_SOURCE_IO_INPUT = 16,
-	COFFEE3_LOG_SOURCE_IO_OUTPUT = 17,
-	COFFEE3_LOG_SOURCE_COUNT = 18
+	COFFEE3_LOG_SOURCE_SYSTEM = 0, /*!< 系统启动与全局状态。 */
+	COFFEE3_LOG_SOURCE_SERVER = 1, /*!< 主机侧 Modbus TCP 服务。 */
+	COFFEE3_LOG_SOURCE_WORKFLOW = 2, /*!< 订单与维护工作流。 */
+	COFFEE3_LOG_SOURCE_ROBOT = 3, /*!< 机器人 TCP 客户端。 */
+	COFFEE3_LOG_SOURCE_BUS2 = 4, /*!< 第二路串行总线。 */
+	COFFEE3_LOG_SOURCE_BUS3 = 5, /*!< 第三路串行总线。 */
+	COFFEE3_LOG_SOURCE_BUS4 = 6, /*!< 第四路串行总线。 */
+	COFFEE3_LOG_SOURCE_BUS5 = 7, /*!< 第五路串行总线。 */
+	COFFEE3_LOG_SOURCE_IO = 8, /*!< 产品 IO 状态层。 */
+	COFFEE3_LOG_SOURCE_COFFEE = 9, /*!< 咖啡机设备。 */
+	COFFEE3_LOG_SOURCE_CUP = 10, /*!< 落杯机设备。 */
+	COFFEE3_LOG_SOURCE_SYRUP = 11, /*!< 糖浆机设备。 */
+	COFFEE3_LOG_SOURCE_LID = 12, /*!< 落盖机设备。 */
+	COFFEE3_LOG_SOURCE_ICE = 13, /*!< 制冰机设备。 */
+	COFFEE3_LOG_SOURCE_WEIGH = 14, /*!< 称重设备。 */
+	COFFEE3_LOG_SOURCE_ENERGY_METER = 15, /*!< 电能表设备。 */
+	COFFEE3_LOG_SOURCE_IO_INPUT = 16, /*!< 外部输入模块。 */
+	COFFEE3_LOG_SOURCE_IO_OUTPUT = 17, /*!< 外部输出模块。 */
+	COFFEE3_LOG_SOURCE_COUNT = 18 /*!< 日志来源数量边界。 */
 } Coffee3LogSource_e;
 
-/** @brief Reuse the common status layout without a second status object. */
+/** @brief 复用公共日志状态布局，不创建第二份状态对象。 */
 typedef AppLogStatus_t Coffee3LogStatus_t;
 
-/** @brief Preserve the established Coffee3 status symbol at source level. */
+/** @brief 把既有 Coffee3 状态符号映射到公共日志状态。 */
 #define g_xCoffee3LogStatus g_xAppLogStatus
 
-/**
-  * @brief  Initialize the static ring, signal, and USART1 Transport.
-  * @retval COFFEE3_LOG_RESULT_OK Initialization completed.
-  * @retval COFFEE3_LOG_RESULT_ALREADY_INITIALIZED Initialization ran before.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Static ring or signal creation failed.
-  * @retval COFFEE3_LOG_RESULT_TRANSPORT USART1 Transport setup failed while
-  *         the ring remains available for Watch diagnostics.
-  * @note   Call after vTransportManagerInit() and USART1 HAL initialization.
-  */
 Coffee3LogResult_e xCoffee3LogInit(void);
-
-/**
-  * @brief  Initialize the ring and optionally create the USART1 Transport.
-  * @param[in] ucEnableTransport Nonzero only after log UART HAL setup passed.
-  * @retval COFFEE3_LOG_RESULT_OK The ring and requested Transport are ready.
-  * @retval COFFEE3_LOG_RESULT_TRANSPORT The ring is ready but output is
-  *         deliberately disabled or Transport setup failed.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Static ring or signal creation failed.
-  */
 Coffee3LogResult_e xCoffee3LogInitWithTransport(uint8_t ucEnableTransport);
-
-/**
-  * @brief  Submit one bounded record without blocking the caller.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Subsystem that generated the record.
-  * @param[in] pcText Null-terminated text copied into the queue record.
-  * @param[in] lCode Source-specific result, error, or diagnostic code.
-  * @retval COFFEE3_LOG_RESULT_OK The ring accepted the record, overwriting
-  *         its oldest record when full.
-  * @retval COFFEE3_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @retval COFFEE3_LOG_RESULT_QUEUE_FULL Retained for API compatibility; the
-  *         overwrite ring does not return this result for a valid write.
-  * @warning Do not call this interface from an interrupt.
-  */
 Coffee3LogResult_e xCoffee3LogWrite(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, const char *pcText, int32_t lCode);
-
-/**
-  * @brief  Submit one Coffee3 log record with an explicit order identifier.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Subsystem that generated the record.
-  * @param[in] usOrderId Host, debug, or system order identifier.
-  * @param[in] pcText Null-terminated event text.
-  * @param[in] lCode Source-specific result or diagnostic code.
-  * @retval COFFEE3_LOG_RESULT_OK The ring accepted the record.
-  * @retval COFFEE3_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Initialization is incomplete.
-  */
 Coffee3LogResult_e xCoffee3LogWriteOrder(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, uint16_t usOrderId, const char *pcText,
 	int32_t lCode);
-
-/**
-  * @brief  Submit one record with one named diagnostic field.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Subsystem that generated the record.
-  * @param[in] pcText Null-terminated event text copied into the record.
-  * @param[in] lResult Normalized operation or state result.
-  * @param[in] pcFieldName Optional field name, or NULL for no field.
-  * @param[in] lFieldValue Field value when pcFieldName is not NULL.
-  * @retval COFFEE3_LOG_RESULT_OK The ring accepted the record, overwriting
-  *         its oldest record when full.
-  * @retval COFFEE3_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Initialization is incomplete.
-  * @retval COFFEE3_LOG_RESULT_QUEUE_FULL Retained for API compatibility; the
-  *         overwrite ring does not return this result for a valid write.
-  * @warning Do not call this interface from an interrupt.
-  */
 Coffee3LogResult_e xCoffee3LogWriteField(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, const char *pcText, int32_t lResult,
 	const char *pcFieldName, int32_t lFieldValue);
-
-/**
-  * @brief  Submit one named Coffee3 record with an order identifier.
-  * @param[in] xLevel Record severity.
-  * @param[in] xSource Subsystem that generated the record.
-  * @param[in] usOrderId Host, debug, or system order identifier.
-  * @param[in] pcText Null-terminated event text.
-  * @param[in] lResult Normalized operation or state result.
-  * @param[in] pcFieldName Optional field name, or NULL for no field.
-  * @param[in] lFieldValue Field value when pcFieldName is not NULL.
-  * @retval COFFEE3_LOG_RESULT_OK The ring accepted the record.
-  * @retval COFFEE3_LOG_RESULT_INVALID_ARG A parameter was invalid.
-  * @retval COFFEE3_LOG_RESULT_NOT_READY Initialization is incomplete.
-  */
 Coffee3LogResult_e xCoffee3LogWriteFieldOrder(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, uint16_t usOrderId, const char *pcText,
 	int32_t lResult, const char *pcFieldName, int32_t lFieldValue);
-
-/** @brief Submit a human-readable Coffee3 log without result fields. */
 Coffee3LogResult_e xCoffee3LogWriteTextOrder(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, uint16_t usOrderId, const char *pcText);
-
-/** @brief Submit a bounded formatted human-readable Coffee3 log. */
 Coffee3LogResult_e xCoffee3LogPrintfOrder(Coffee3LogLevel_e xLevel,
 	Coffee3LogSource_e xSource, uint16_t usOrderId, const char *pcFormat, ...);
-
-/**
-  * @brief  Write one startup probe before the scheduler begins.
-  * @param[in] pucData Bytes to transmit through the initialized log channel.
-  * @param[in] usLength Number of bytes to transmit.
-  * @retval 0 Transmission completed.
-  * @return Negative normalized Transport result on failure.
-  * @note   Call only after xCoffee3LogInit().
-  */
 int32_t lCoffee3LogEarlyWrite(const uint8_t *pucData, uint16_t usLength);
-
-/**
-  * @brief  Run the sole USART1 log output owner task.
-  * @param[in] pvArgument Unused task argument.
-  * @note   Create only after xCoffee3LogInit(); a transport failure does not
-  *         invalidate the ring.
-  */
 void vCoffee3LogTask(void *pvArgument);
-
-/**
-  * @brief  Publish the result of C3Log task creation.
-  * @param[in] ucCreated Nonzero when xTaskCreate returned pdPASS.
-  * @note   A failed logger task does not stop business task creation.
-  */
 void vCoffee3LogSetTaskReady(uint8_t ucCreated);
-
-/**
-  * @brief  Copy a consistent log status snapshot.
-  * @param[out] pxStatus Caller-owned status destination; ignored when NULL.
-  */
 void vCoffee3LogGetStatus(Coffee3LogStatus_t *pxStatus);
-
-/**
-  * @brief  Log LwIP resource statistics after a network API failure.
-  * @param[in] xSource Coffee3 subsystem that observed the failure.
-  * @param[in] lNativeError Native socket or LwIP error value.
-  * @note   This interface never changes the caller's failure result and does
-  *         not make logging a prerequisite for normal operation.
-  */
 void vCoffee3LogLwipResourceFailure(Coffee3LogSource_e xSource,
 	int32_t lNativeError);
 

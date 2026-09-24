@@ -1,6 +1,8 @@
 /**
   * @file      coffee3_ota.h
-  * @brief     Define the Coffee3 OTA flash and HTTP owner interface.
+  * @brief     定义 Coffee3 OTA Flash 与 HTTP 服务接口。
+  * @author    WHong
+  * @date      2026-09-24
   */
 
 #ifndef COFFEE3_OTA_H
@@ -14,6 +16,7 @@ extern "C" {
 #include "FreeRTOS.h"
 #include "Ota/app_ota_flash.h"
 
+/** @brief Coffee3 OTA 元数据、暂存区与应用区 Flash 边界。 */
 #define COFFEE3_OTA_METADATA_ADDRESS       0x08004000UL
 #define COFFEE3_OTA_STAGING_ADDRESS        0x08060000UL
 #define COFFEE3_OTA_STAGING_END            0x080C0000UL
@@ -23,6 +26,7 @@ extern "C" {
 	(COFFEE3_OTA_APPLICATION_END - COFFEE3_OTA_APPLICATION_ADDRESS)
 #define COFFEE3_OTA_METADATA_MAGIC         0xDEADBEEFUL
 
+/** @brief 复用公共 OTA 服务的结果枚举。 */
 typedef AppOtaResult_e Coffee3OtaResult_e;
 
 Coffee3OtaResult_e xCoffee3OtaInitialize(void);

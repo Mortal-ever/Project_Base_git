@@ -1,8 +1,8 @@
 /**
   * @file      coffee3_device.h
-  * @brief     Define Coffee3 device bindings, commands, events, and status.
+  * @brief     定义 Coffee3 设备绑定、命令、事件与公共状态。
   * @author    WHong
-  * @date      2026-07-30
+  * @date      2026-09-24
   */
 
 #ifndef COFFEE3_DEVICE_H
@@ -19,105 +19,105 @@ extern "C" {
 #include "event_groups.h"
 #include "queue.h"
 
-/** @brief Identify every independently monitored Coffee3 device. */
+/** @brief 标识每个独立监测的 Coffee3 逻辑设备。 */
 typedef enum {
-	COFFEE3_DEVICE_NONE = 0,
-	COFFEE3_DEVICE_ROBOT = 1,
-	COFFEE3_DEVICE_COFFEE_MACHINE = 2,
-	COFFEE3_DEVICE_CUP_MACHINE = 3,
-	COFFEE3_DEVICE_SYRUP_MACHINE = 4,
-	COFFEE3_DEVICE_LID_MACHINE = 5,
-	COFFEE3_DEVICE_ICE_MACHINE = 6,
-	COFFEE3_DEVICE_SCALE = 7,
-	COFFEE3_DEVICE_POWER_METER = 8,
-	COFFEE3_DEVICE_IO_INPUT = 9,
-	COFFEE3_DEVICE_IO_OUTPUT = 10,
-	COFFEE3_DEVICE_COUNT = 11
+	COFFEE3_DEVICE_NONE = 0, /*!< 无设备占位值。 */
+	COFFEE3_DEVICE_ROBOT = 1, /*!< 机器人。 */
+	COFFEE3_DEVICE_COFFEE_MACHINE = 2, /*!< 咖啡机。 */
+	COFFEE3_DEVICE_CUP_MACHINE = 3, /*!< 落杯机。 */
+	COFFEE3_DEVICE_SYRUP_MACHINE = 4, /*!< 糖浆机。 */
+	COFFEE3_DEVICE_LID_MACHINE = 5, /*!< 落盖机。 */
+	COFFEE3_DEVICE_ICE_MACHINE = 6, /*!< 制冰机。 */
+	COFFEE3_DEVICE_SCALE = 7, /*!< 称重设备。 */
+	COFFEE3_DEVICE_POWER_METER = 8, /*!< 电能表。 */
+	COFFEE3_DEVICE_IO_INPUT = 9, /*!< 外部输入模块。 */
+	COFFEE3_DEVICE_IO_OUTPUT = 10, /*!< 外部输出模块。 */
+	COFFEE3_DEVICE_COUNT = 11 /*!< 设备编号数量边界。 */
 } Coffee3DeviceId_e;
 
-/** @brief Identify the producer of a Coffee3 device command. */
+/** @brief 标识 Coffee3 设备命令的生产者。 */
 typedef enum {
-	COFFEE3_COMMAND_SOURCE_WORKFLOW = 0,
-	COFFEE3_COMMAND_SOURCE_SERVER = 1,
-	COFFEE3_COMMAND_SOURCE_MAINTENANCE = 2
+	COFFEE3_COMMAND_SOURCE_WORKFLOW = 0, /*!< 自动订单工作流。 */
+	COFFEE3_COMMAND_SOURCE_SERVER = 1, /*!< 主机人工调试接口。 */
+	COFFEE3_COMMAND_SOURCE_MAINTENANCE = 2 /*!< 维护流程。 */
 } Coffee3CommandSource_e;
 
-/** @brief Mark an interactive debug command exempt from system ownership gates. */
+/** @brief 标记交互调试命令，用于选择人工控制策略。 */
 #define COFFEE3_COMMAND_FLAG_DEBUG 0x04U
 
-/** @brief Expose the Robot owner transaction phase to workflow timing. */
+/** @brief 向工作流暴露机器人拥有者的事务阶段。 */
 typedef enum {
-	COFFEE3_ROBOT_PHASE_IDLE = 0,
-	COFFEE3_ROBOT_PHASE_PREPARING = 1,
-	COFFEE3_ROBOT_PHASE_WAIT_ACCEPT = 2,
-	COFFEE3_ROBOT_PHASE_MOVING = 3,
-	COFFEE3_ROBOT_PHASE_CLEAR_RESULT = 4,
-	COFFEE3_ROBOT_PHASE_RECOVERING = 5
+	COFFEE3_ROBOT_PHASE_IDLE = 0, /*!< 没有活动事务。 */
+	COFFEE3_ROBOT_PHASE_PREPARING = 1, /*!< 正在准备动作寄存器。 */
+	COFFEE3_ROBOT_PHASE_WAIT_ACCEPT = 2, /*!< 等待机器人接受命令。 */
+	COFFEE3_ROBOT_PHASE_MOVING = 3, /*!< 机器人正在执行动作。 */
+	COFFEE3_ROBOT_PHASE_CLEAR_RESULT = 4, /*!< 正在清除结果位。 */
+	COFFEE3_ROBOT_PHASE_RECOVERING = 5 /*!< 链路恢复中。 */
 } Coffee3RobotPhase_e;
 
-/** @brief Identify Coffee3 actions consumed by the private owners. */
+/** @brief 标识各私有设备拥有者消费的 Coffee3 产品动作。 */
 typedef enum {
-	/* 基础操作 */
-	COFFEE3_ACTION_REFRESH = 1,          // 刷新
-	COFFEE3_ACTION_CANCEL = 2,           // 取消
-	COFFEE3_ACTION_RESET = 3,            // 重置/复位
+	/* 基础操作。 */
+	COFFEE3_ACTION_REFRESH = 1, /*!< 刷新设备状态。 */
+	COFFEE3_ACTION_CANCEL = 2, /*!< 取消当前动作。 */
+	COFFEE3_ACTION_RESET = 3, /*!< 复位设备。 */
 
-	/* 机器人（机械臂）控制：100~129 */
-	COFFEE3_ACTION_ROBOT_START = 100,        // 机器人启动
-	COFFEE3_ACTION_ROBOT_STOP = 101,         // 机器人停止
-	COFFEE3_ACTION_ROBOT_ENABLE = 102,       // 机器人使能
-	COFFEE3_ACTION_ROBOT_CLEAR_ALARM = 103,  // 清除机器人报警
-	COFFEE3_ACTION_ROBOT_PAUSE = 104,        // 机器人暂停
-	COFFEE3_ACTION_ROBOT_DISABLE = 105,      // 机器人去使能（禁用）
-	COFFEE3_ACTION_ROBOT_ENTER_DRAG = 106,   // 进入拖动模式（手动拖拽示教）
-	COFFEE3_ACTION_ROBOT_EXIT_DRAG = 107,    // 退出拖动模式
-	COFFEE3_ACTION_ROBOT_AUTO_MODE = 108,    // 机器人自动模式
-	COFFEE3_ACTION_ROBOT_MANUAL_MODE = 109,  // 机器人手动模式
-	COFFEE3_ACTION_ROBOT_HOME = 110,         // 机器人回原点（归零）
-	COFFEE3_ACTION_ROBOT_TAKE_HOT_CUP = 111, // 取热杯
-	COFFEE3_ACTION_ROBOT_TAKE_COLD_CUP = 112,// 取冷杯
-	COFFEE3_ACTION_ROBOT_TO_COFFEE = 113,    // 移动到咖啡机位置
-	COFFEE3_ACTION_ROBOT_TO_ICE = 114,       // 移动到出冰站位置
-	COFFEE3_ACTION_ROBOT_TO_LID = 115,       // 移动到杯盖机位置
-	COFFEE3_ACTION_ROBOT_TAKE_LID = 116,     // 取杯盖
-	COFFEE3_ACTION_ROBOT_COVER_LID = 117,    // 盖杯盖
-	COFFEE3_ACTION_ROBOT_PUT_OUTPUT = 118,   // 放到出杯口（取餐口）
-	COFFEE3_ACTION_ROBOT_PUT_STORAGE = 119,  // 放到储藏位/存放位
-	COFFEE3_ACTION_ROBOT_TO_PRINTER = 120,   // 移动到打印机位置
-	COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_1 = 121,// 从取餐口1取杯
-	COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_2 = 122,// 从取餐口2取杯
-	COFFEE3_ACTION_ROBOT_TAKE_COFFEE = 123,  // 取咖啡（接咖啡）
-	COFFEE3_ACTION_ROBOT_TAKE_STORAGE = 124, // 从储藏位取杯
-	COFFEE3_ACTION_ROBOT_START_SIGNAL = 125, // 机器人启动信号
-	COFFEE3_ACTION_ROBOT_TO_FRUIT_SYRUP = 126,   // 移动到果糖浆机位置
-	COFFEE3_ACTION_ROBOT_PREPARE_ORDER = 127,    // 机器人准备订单（预处理）
+	/* 机器人控制：100 至 129。 */
+	COFFEE3_ACTION_ROBOT_START = 100, /*!< 启动机器人。 */
+	COFFEE3_ACTION_ROBOT_STOP = 101, /*!< 停止机器人。 */
+	COFFEE3_ACTION_ROBOT_ENABLE = 102, /*!< 使能机器人。 */
+	COFFEE3_ACTION_ROBOT_CLEAR_ALARM = 103, /*!< 清除机器人报警。 */
+	COFFEE3_ACTION_ROBOT_PAUSE = 104, /*!< 暂停机器人。 */
+	COFFEE3_ACTION_ROBOT_DISABLE = 105, /*!< 去使能机器人。 */
+	COFFEE3_ACTION_ROBOT_ENTER_DRAG = 106, /*!< 进入拖动示教模式。 */
+	COFFEE3_ACTION_ROBOT_EXIT_DRAG = 107, /*!< 退出拖动示教模式。 */
+	COFFEE3_ACTION_ROBOT_AUTO_MODE = 108, /*!< 切换自动模式。 */
+	COFFEE3_ACTION_ROBOT_MANUAL_MODE = 109, /*!< 切换手动模式。 */
+	COFFEE3_ACTION_ROBOT_HOME = 110, /*!< 返回原点。 */
+	COFFEE3_ACTION_ROBOT_TAKE_HOT_CUP = 111, /*!< 取热杯。 */
+	COFFEE3_ACTION_ROBOT_TAKE_COLD_CUP = 112, /*!< 取冷杯。 */
+	COFFEE3_ACTION_ROBOT_TO_COFFEE = 113, /*!< 移动到咖啡机。 */
+	COFFEE3_ACTION_ROBOT_TO_ICE = 114, /*!< 移动到出冰站。 */
+	COFFEE3_ACTION_ROBOT_TO_LID = 115, /*!< 移动到杯盖机。 */
+	COFFEE3_ACTION_ROBOT_TAKE_LID = 116, /*!< 取杯盖。 */
+	COFFEE3_ACTION_ROBOT_COVER_LID = 117, /*!< 盖杯盖。 */
+	COFFEE3_ACTION_ROBOT_PUT_OUTPUT = 118, /*!< 把杯放到取餐口。 */
+	COFFEE3_ACTION_ROBOT_PUT_STORAGE = 119, /*!< 把杯放到储位。 */
+	COFFEE3_ACTION_ROBOT_TO_PRINTER = 120, /*!< 移动到打印机。 */
+	COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_1 = 121, /*!< 从取餐口一取杯。 */
+	COFFEE3_ACTION_ROBOT_TAKE_OUTPUT_2 = 122, /*!< 从取餐口二取杯。 */
+	COFFEE3_ACTION_ROBOT_TAKE_COFFEE = 123, /*!< 从咖啡机取杯。 */
+	COFFEE3_ACTION_ROBOT_TAKE_STORAGE = 124, /*!< 从储位取杯。 */
+	COFFEE3_ACTION_ROBOT_START_SIGNAL = 125, /*!< 触发机器人启动信号。 */
+	COFFEE3_ACTION_ROBOT_TO_FRUIT_SYRUP = 126, /*!< 移动到果奶工位。 */
+	COFFEE3_ACTION_ROBOT_PREPARE_ORDER = 127, /*!< 预处理订单动作。 */
 
-	/* 咖啡机控制：200~203 */
-	COFFEE3_ACTION_COFFEE_MAKE = 200,     // 制作咖啡
-	COFFEE3_ACTION_COFFEE_PAUSE = 201,    // 咖啡制作暂停
-	COFFEE3_ACTION_COFFEE_RESUME = 202,   // 咖啡制作恢复（继续）
-	COFFEE3_ACTION_COFFEE_CLEAN = 203,    // 咖啡机清洗
+	/* 咖啡机控制：200 至 203。 */
+	COFFEE3_ACTION_COFFEE_MAKE = 200, /*!< 制作咖啡。 */
+	COFFEE3_ACTION_COFFEE_PAUSE = 201, /*!< 暂停制作。 */
+	COFFEE3_ACTION_COFFEE_RESUME = 202, /*!< 继续制作。 */
+	COFFEE3_ACTION_COFFEE_CLEAN = 203, /*!< 清洗咖啡机。 */
 
-	/* 出杯/出盖/糖浆：300~322 */
-	COFFEE3_ACTION_CUP_DROP_1 = 300,      // 出杯口1落杯
-	COFFEE3_ACTION_CUP_DROP_2 = 301,      // 出杯口2落杯
-	COFFEE3_ACTION_LID_DROP_1 = 310,      // 杯盖口1落盖
-	COFFEE3_ACTION_LID_DROP_2 = 311,      // 杯盖口2落盖
-	COFFEE3_ACTION_SYRUP_DISPENSE = 320,  // 糖浆出液（分配糖浆）
-	COFFEE3_ACTION_SYRUP_CLEAN = 321,     // 糖浆管路清洗
-	COFFEE3_ACTION_SYRUP_SET_REMAINING = 322, // 设置糖浆剩余量
+	/* 出杯、出盖与糖浆控制：300 至 322。 */
+	COFFEE3_ACTION_CUP_DROP_1 = 300, /*!< 一号槽落杯。 */
+	COFFEE3_ACTION_CUP_DROP_2 = 301, /*!< 二号槽落杯。 */
+	COFFEE3_ACTION_LID_DROP_1 = 310, /*!< 一号槽落盖。 */
+	COFFEE3_ACTION_LID_DROP_2 = 311, /*!< 二号槽落盖。 */
+	COFFEE3_ACTION_SYRUP_DISPENSE = 320, /*!< 定量输出糖浆。 */
+	COFFEE3_ACTION_SYRUP_CLEAN = 321, /*!< 清洗糖浆管路。 */
+	COFFEE3_ACTION_SYRUP_SET_REMAINING = 322, /*!< 设置糖浆剩余量。 */
 
-	/* 出冰/称重/IO：330~351 */
-	COFFEE3_ACTION_ICE_SET_VALVE = 330,   // 设置出冰阀（开/关冰阀）
-	COFFEE3_ACTION_SCALE_TARE = 340,      // 电子秤去皮（扣重）
-	COFFEE3_ACTION_SCALE_CLEAR_TARE = 341,// 电子秤清除去皮
-	COFFEE3_ACTION_SCALE_ZERO = 342,      // 电子秤置零（校零）
-	COFFEE3_ACTION_IO_WRITE = 350,        // IO 写操作（写输出信号）
-	COFFEE3_ACTION_IO_WRITE_MASK = 351    // IO 掩码写操作（按位掩码写入）
-} Coffee3Action_e;  // 咖啡机3 动作枚举类型
+	/* 出冰、称重与 IO 控制：330 至 351。 */
+	COFFEE3_ACTION_ICE_SET_VALVE = 330, /*!< 开关出冰阀。 */
+	COFFEE3_ACTION_SCALE_TARE = 340, /*!< 电子秤去皮。 */
+	COFFEE3_ACTION_SCALE_CLEAR_TARE = 341, /*!< 清除电子秤去皮。 */
+	COFFEE3_ACTION_SCALE_ZERO = 342, /*!< 电子秤置零。 */
+	COFFEE3_ACTION_IO_WRITE = 350, /*!< 写单个 IO 输出。 */
+	COFFEE3_ACTION_IO_WRITE_MASK = 351 /*!< 按掩码写 IO 输出。 */
+} Coffee3Action_e;
 
 
-/** @brief Per-device EventGroup bits with identical meaning for all devices. */
+/** @brief 所有设备共用相同语义的独立事件组位。 */
 #define COFFEE3_DEVICE_EVENT_ONLINE          (1UL << 0)
 #define COFFEE3_DEVICE_EVENT_READY           (1UL << 1)
 #define COFFEE3_DEVICE_EVENT_BUSY            (1UL << 2)
@@ -130,203 +130,108 @@ typedef enum {
 #define COFFEE3_DEVICE_EVENT_DATA_UPDATED    (1UL << 9)
 #define COFFEE3_DEVICE_EVENT_RECOVERING      (1UL << 10)
 
-/** @brief Normalized result used when an order epoch is canceled. */
+/** @brief 订单取消、命令替换与命令策略标志。 */
 #define COFFEE3_COMMAND_RESULT_CANCELED       (-9)
 #define COFFEE3_COMMAND_RESULT_SUPERSEDED     (-10)
 #define COFFEE3_COMMAND_FLAG_SAFETY_STOP       0x01U
 #define COFFEE3_COMMAND_FLAG_MANUAL_RESERVED   0x02U
 
-/** @brief Terminal command bits waited by workflow steps. */
+/** @brief 工作流等待设备命令终态时使用的事件位集合。 */
 #define COFFEE3_DEVICE_EVENT_TERMINAL         \
 	(COFFEE3_DEVICE_EVENT_COMMAND_DONE |       \
 	 COFFEE3_DEVICE_EVENT_COMMAND_FAILED |     \
 	 COFFEE3_DEVICE_EVENT_TIMEOUT |            \
 	 COFFEE3_DEVICE_EVENT_CANCELED)
 
-/** @brief Store one Coffee3 command copied through static owner queues. */
+/** @brief 保存通过静态拥有者队列按值复制的一条 Coffee3 命令。 */
 typedef struct {
-	uint32_t ulCommandId; /*!< Submission sequence; pair with epoch to identify completion. */
-	uint32_t ulOrderId; /*!< Log correlation id; not a queue priority or slave address. */
-	uint32_t ulOrderEpoch; /*!< Cancellation generation; zero denotes non-order work. */
-	uint32_t ulTimeoutMs; /*!< Owner transaction budget in milliseconds, not queue wait ticks. */
-	uint16_t usStepId; /*!< Workflow diagnostic step, preserved through the owner queue. */
-	uint16_t usAction; /*!< Product action; owner translates it to a device-native request. */
-	uint16_t ausParameter[4]; /*!< Four inline action parameters, copied with the queue item. */
-	uint8_t ucDeviceId; /*!< Logical device id resolved through the immutable binding table. */
-	uint8_t ucSource; /*!< Producer category used by admission, cancellation and logging. */
-	uint8_t ucRetryLimit; /*!< Additional owner attempts; non-idempotent coffee writes override it. */
-	uint8_t ucFlags; /*!< Safety-stop, manual-reservation and debug policy bits. */
+	uint32_t ulCommandId; /*!< 与归属代次共同标识终态的提交序号。 */
+	uint32_t ulOrderId; /*!< 日志关联订单号，不表示优先级或从站地址。 */
+	uint32_t ulOrderEpoch; /*!< 命令归属与取消代次；零表示无归属代次。 */
+	uint32_t ulTimeoutMs; /*!< 拥有者事务预算，单位毫秒。 */
+	uint16_t usStepId; /*!< 随队列保留的工作流诊断步骤号。 */
+	uint16_t usAction; /*!< 由设备拥有者翻译的产品动作。 */
+	uint16_t ausParameter[4]; /*!< 随队列项复制的四个动作参数。 */
+	uint8_t ucDeviceId; /*!< 通过固定绑定表解析的逻辑设备编号。 */
+	uint8_t ucSource; /*!< 用于准入、取消和日志的命令来源。 */
+	uint8_t ucRetryLimit; /*!< 拥有者可执行的附加重试次数。 */
+	uint8_t ucFlags; /*!< 安全停止、人工占用与调试策略位。 */
 } Coffee3Command_t;
 
+/** @brief 在编译期约束队列命令结构必须保持 32 字节。 */
 typedef char Coffee3CommandSizeMustBe32[
 	(sizeof(Coffee3Command_t) == 32U) ? 1 : -1];
 
-/** @brief Bind one logical device to one task route and native protocol. */
+/** @brief 把一个逻辑设备绑定到任务路由和原生协议。 */
 typedef struct {
-	Coffee3DeviceId_e xDeviceId; /*!< Product device key; differs from the Modbus slave unit. */
-	uint8_t ucRouteId; /*!< Queue owner: Robot route 0 or UART bus routes 2 through 5. */
-	uint8_t ucUnitId; /*!< Protocol slave address on the selected physical route. */
-	uint16_t usMinimumIntervalMs; /*!< Minimum gap between owner transactions, in milliseconds. */
-	uint8_t ucCategory; /*!< Public device category, independent of installed driver model. */
-	uint8_t ucRole; /*!< Device role; cup and lid may share a controller with different roles. */
-	uint8_t ucDriverId; /*!< Selected public driver model for this product binding. */
-	uint8_t ucProtocolId; /*!< Wire protocol selected for the bound device or bus. */
-	const char *pcName; /*!< Borrowed static diagnostic name; storage outlives owner tasks. */
+	Coffee3DeviceId_e xDeviceId; /*!< 产品逻辑设备键，不等同于 Modbus 从站号。 */
+	uint8_t ucRouteId; /*!< 队列拥有者路由：机器人为零，RTU 为二至五。 */
+	uint8_t ucUnitId; /*!< 所选物理路由上的协议从站地址。 */
+	uint16_t usMinimumIntervalMs; /*!< 拥有者事务最小间隔，单位毫秒。 */
+	uint8_t ucCategory; /*!< 与具体驱动型号无关的公共设备类别。 */
+	uint8_t ucRole; /*!< 同一控制器中的设备角色。 */
+	uint8_t ucDriverId; /*!< 产品绑定选择的公共驱动型号。 */
+	uint8_t ucProtocolId; /*!< 绑定设备或总线使用的线协议。 */
+	const char *pcName; /*!< 生命周期覆盖拥有者任务的静态诊断名称。 */
 } Coffee3DeviceBinding_t;
 
-/** @brief Store globally observable status for one logical device. */
+/** @brief 保存一个逻辑设备的全局可观察运行状态。 */
 typedef struct {
-	uint32_t ulLastCommandId; /*!< Most recently started command, not necessarily a terminal result. */
-	uint32_t ulLastOrderEpoch; /*!< Generation of the most recently started command. */
-	uint32_t ulLastSuccessTick; /*!< RTOS tick of last success; not a millisecond counter. */
-	uint32_t ulCommandCount; /*!< Cumulative commands observed by this owner/status object. */
-	uint32_t ulErrorCount; /*!< Cumulative failures; latest cause is retained separately. */
-	int32_t lLastResult; /*!< Latest native owner result; zero alone does not prove readiness. */
-	uint16_t usLastAction; /*!< Action associated with the most recently started command. */
-	uint8_t ucOnline; /*!< Communication availability; independent of control readiness. */
-	uint8_t ucBusy; /*!< Owner has published a started command without its terminal result. */
-	uint8_t ucReady; /*!< Module-specific readiness; consult the producer before issuing work. */
-	uint8_t ucRecovering; /*!< Current command is retained while its link is being recovered. */
-	uint8_t ucRobotPhase; /*!< Robot transaction phase used by workflow timeout decisions. */
-	uint8_t ucRobotAccepted; /*!< Acceptance edge for the current robot command. */
-	uint8_t ucTerminalValid; /*!< Latest terminal fields contain a published result. */
-	uint8_t ucPreviousTerminalValid; /*!< Previous terminal fields contain a published result. */
-	uint32_t ulTerminalCommandId; /*!< Sequence key of the latest retained terminal result. */
-	uint32_t ulTerminalOrderEpoch; /*!< Generation key of the latest retained terminal result. */
-	int32_t lTerminalResult; /*!< Uncollapsed owner result for the latest completed command. */
-	uint16_t usTerminalAction; /*!< Completed action; successful CANCEL maps to canceled event. */
-	uint8_t ucTerminalTimedOut; /*!< Explicit timeout classification of the latest result. */
-	uint32_t ulPreviousTerminalCommandId; /*!< Sequence key of the preceding retained completion. */
-	uint32_t ulPreviousTerminalOrderEpoch; /*!< Generation key of the preceding completion. */
-	int32_t lPreviousTerminalResult; /*!< Original owner result from the preceding completion. */
-	uint16_t usPreviousTerminalAction; /*!< Action associated with the preceding completion. */
-	uint8_t ucPreviousTerminalTimedOut; /*!< Timeout classification of the preceding completion. */
+	uint32_t ulLastCommandId; /*!< 最近开始的命令序号，不一定已有终态。 */
+	uint32_t ulLastOrderEpoch; /*!< 最近开始命令的归属代次。 */
+	uint32_t ulLastSuccessTick; /*!< 最近成功时的 RTOS 节拍。 */
+	uint32_t ulCommandCount; /*!< 此状态对象累计观察到的命令数。 */
+	uint32_t ulErrorCount; /*!< 累计失败次数。 */
+	int32_t lLastResult; /*!< 最近原始结果，单独为零不能证明设备就绪。 */
+	uint16_t usLastAction; /*!< 最近开始命令的动作编号。 */
+	uint8_t ucOnline; /*!< 通信是否可用，与控制就绪状态独立。 */
+	uint8_t ucBusy; /*!< 已发布开始但尚未发布终态。 */
+	uint8_t ucReady; /*!< 模块特定的业务控制就绪状态。 */
+	uint8_t ucRecovering; /*!< 当前命令是否在链路恢复期间保持。 */
+	uint8_t ucRobotPhase; /*!< 工作流超时判断使用的机器人事务阶段。 */
+	uint8_t ucRobotAccepted; /*!< 当前机器人命令的接受边沿。 */
+	uint8_t ucTerminalValid; /*!< 最新终态字段是否包含已发布结果。 */
+	uint8_t ucPreviousTerminalValid; /*!< 上一个终态字段是否有效。 */
+	uint32_t ulTerminalCommandId; /*!< 最新保留终态的命令序号。 */
+	uint32_t ulTerminalOrderEpoch; /*!< 最新保留终态的归属代次。 */
+	int32_t lTerminalResult; /*!< 最新完成命令的原始结果。 */
+	uint16_t usTerminalAction; /*!< 最新完成命令的动作编号。 */
+	uint8_t ucTerminalTimedOut; /*!< 最新结果是否按超时分类。 */
+	uint32_t ulPreviousTerminalCommandId; /*!< 上一个保留终态的命令序号。 */
+	uint32_t ulPreviousTerminalOrderEpoch; /*!< 上一个保留终态的归属代次。 */
+	int32_t lPreviousTerminalResult; /*!< 上一个完成命令的原始结果。 */
+	uint16_t usPreviousTerminalAction; /*!< 上一个完成命令的动作编号。 */
+	uint8_t ucPreviousTerminalTimedOut; /*!< 上一个结果是否按超时分类。 */
 } Coffee3DeviceStatus_t;
 
-/** @brief Public status array indexed by Coffee3DeviceId_e. */
+/** @brief 按 Coffee3DeviceId_e 索引的公共设备状态数组。 */
 extern Coffee3DeviceStatus_t
 	g_axCoffee3DeviceStatus[COFFEE3_DEVICE_COUNT];
 
-/**
-  * @brief Create the independent static EventGroup for every device.
-  * @retval pdPASS All device event groups are available.
-  * @retval pdFAIL Initialization failed or ran with invalid resources.
-  */
 BaseType_t xCoffee3DeviceInitialize(void);
-
-/**
-  * @brief Register the command queue owned by one task route.
-  * @param[in] ucRouteId Zero for Robot TCP, two through five for RTU buses.
-  * @param[in] xQueue Persistent queue handle.
-  */
 void vCoffee3DeviceRegisterRoute(uint8_t ucRouteId, QueueHandle_t xQueue);
-
-/**
-  * @brief Return the immutable binding for one device.
-  * @param[in] xDeviceId Logical device identifier.
-  * @return Binding pointer, or NULL for an invalid device.
-  */
 const Coffee3DeviceBinding_t *pxCoffee3DeviceGetBinding(
 	Coffee3DeviceId_e xDeviceId);
-
-/**
-  * @brief Submit one command to the queue selected by its device binding.
-  * @param[in,out] pxCommand Command copied into a bounded route queue.
-  * @param[in] xWaitTicks Maximum queue wait.
-  * @retval pdPASS The route queue accepted the command.
-  * @retval pdFAIL The command, device, route, or queue was invalid/full.
-  */
 BaseType_t xCoffee3CommandSubmit(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks);
-
-/**
-  * @brief Submit a safety command at the front of its owner queue.
-  * @param[in,out] pxCommand Command copied into a bounded route queue.
-  * @param[in] xWaitTicks Maximum queue wait.
-  * @retval pdPASS The route queue accepted the urgent command.
-  * @retval pdFAIL The command, device, route, or queue was invalid/full.
-  */
 BaseType_t xCoffee3CommandSubmitUrgent(Coffee3Command_t *pxCommand,
 	TickType_t xWaitTicks);
-
-/**
-  * @brief Mark an order epoch as cooperatively canceled.
-  * @param[in] ulOrderEpoch Nonzero workflow epoch to cancel.
-  */
 void vCoffee3OrderCancelRequest(uint32_t ulOrderEpoch);
-
-/**
-  * @brief Test whether a workflow command belongs to the canceled epoch.
-  * @param[in] pxCommand Command currently owned by a device task.
-  * @retval 1 The command should stop at its next cooperative poll point.
-  * @retval 0 The command remains valid.
-  */
 uint8_t ucCoffee3CommandIsCanceled(const Coffee3Command_t *pxCommand);
-
-/**
-  * @brief Publish command start and clear prior terminal state.
-  * @param[in] pxCommand Command being executed by its owning task.
-  */
 void vCoffee3DeviceCommandStarted(const Coffee3Command_t *pxCommand);
-
-/**
-  * @brief Publish command completion and normalized result.
-  * @param[in] pxCommand Completed command.
-  * @param[in] lResult Zero for success, negative for failure.
-  * @param[in] ucTimedOut Nonzero classifies the failure as timeout.
-  */
 void vCoffee3DeviceCommandCompleted(const Coffee3Command_t *pxCommand,
 	int32_t lResult, uint8_t ucTimedOut);
-
-/**
-  * @brief Set or clear the device online state and communication fault bit.
-  * @param[in] xDeviceId Logical device identifier.
-  * @param[in] ucOnline Nonzero when communication is available.
-  */
 void vCoffee3DeviceSetOnline(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucOnline);
-
-/**
-  * @brief Publish strict device-control readiness independently of link state.
-  * @param[in] xDeviceId Logical device identifier.
-  * @param[in] ucReady Nonzero only when the device is safe for commands.
-  */
 void vCoffee3DeviceSetReady(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucReady);
-
-/**
-  * @brief Publish that the current command is being held for link recovery.
-  * @param[in] xDeviceId Logical device identifier.
-  * @param[in] ucRecovering Nonzero while the command remains BUSY.
-  */
 void vCoffee3DeviceSetRecovering(Coffee3DeviceId_e xDeviceId,
 	uint8_t ucRecovering);
-
-/** @brief Publish Robot transaction phase for workflow timing and diagnostics. */
 void vCoffee3DeviceSetRobotPhase(Coffee3RobotPhase_e xPhase);
-
-/** @brief Publish the Robot command acceptance edge. */
 void vCoffee3DeviceSetRobotAccepted(uint8_t ucAccepted);
-
-/**
-  * @brief Read the independent EventGroup bits for one device.
-  * @param[in] xDeviceId Logical device identifier.
-  * @return Current EventGroup bits, or zero for an invalid device.
-  */
 EventBits_t xCoffee3DeviceGetEvents(Coffee3DeviceId_e xDeviceId);
-
-/**
-  * @brief Wait for the terminal event belonging to a specific command.
-  * @param[in] xDeviceId Logical device identifier.
-  * @param[in] ulOrderEpoch Expected order generation.
-  * @param[in] ulCommandId Expected command sequence.
-  * @param[in] xWaitTicks Maximum wait.
-  * @return Terminal device event bits, or zero on timeout/stale completion.
-  */
 EventBits_t xCoffee3DeviceWaitCommand(Coffee3DeviceId_e xDeviceId,
 	uint32_t ulOrderEpoch, uint32_t ulCommandId, TickType_t xWaitTicks);
-
-/** @brief Read an exact terminal result retained in static command history. */
 int32_t lCoffee3DeviceGetTerminalResult(Coffee3DeviceId_e xDeviceId,
 	uint32_t ulOrderEpoch, uint32_t ulCommandId, uint8_t *pucValid);
 

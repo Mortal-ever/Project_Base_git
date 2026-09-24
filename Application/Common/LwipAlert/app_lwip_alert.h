@@ -1,12 +1,12 @@
 /**
   * @file      app_lwip_alert.h
-  * @brief     Define event-triggered LwIP resource alerts for all targets.
+  * @brief     定义面向所有产品目标的 LwIP 资源故障告警接口。
   * @author    WHong
-  * @date      2026-08-27
+  * @date      2026-09-24
   *
-  * @details   A target calls this service only after a network API failure.
-  *            The service snapshots LwIP allocation statistics and writes
-  *            diagnostic records through the common AppLog interface.
+  * @details   产品目标在网络接口失败后调用本服务。启用 LWIP_STATS
+  *            和 MEMP_STATS 时截取内存池统计并记录诊断；
+  *            关闭相关统计配置时对应采集路径不执行操作。
   */
 
 #ifndef APP_LWIP_ALERT_H
@@ -20,14 +20,6 @@ extern "C" {
 
 #include "Log/app_log.h"
 
-/**
-  * @brief  Report one network API failure with an LwIP resource snapshot.
-  * @param[in] xSource Target-defined log source associated with the failure.
-  * @param[in] lNativeError Native LwIP or socket error value.
-  * @note   Task-context only. The function performs no polling, allocation,
-  *         retry, or control-flow change. When LwIP statistics are disabled,
-  *         it compiles to a no-operation implementation.
-  */
 void vAppLwipAlertReportFailure(AppLogSourceId_t xSource,
 	int32_t lNativeError);
 
